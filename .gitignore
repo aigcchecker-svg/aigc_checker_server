@@ -1,0 +1,10 @@
+.idea
+.env
+.venv
+__pycache__
+*.pyc
+api/__pycache__
+api/*.pyc
+services/__pycache__
+services/*.pyc
+.DS_Store
