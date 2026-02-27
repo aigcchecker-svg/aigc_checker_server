@@ -23,14 +23,13 @@ if [ -f ".env" ]; then
     export $(grep -v '^#' .env | xargs)
 fi
 
-# 杀掉已有进程（如有）
-if [ -f "server.pid" ]; then
-    EXISTING_PID=$(cat server.pid)
-    if kill -0 "$EXISTING_PID" 2>/dev/null; then
-        kill "$EXISTING_PID" && echo ">>> 已停止旧进程（PID: $EXISTING_PID）"
-    fi
-    rm -f server.pid
+# 杀掉占用 8027 端口的所有进程
+PIDS=$(lsof -ti :8027 2>/dev/null)
+if [ -n "$PIDS" ]; then
+    echo ">>> 杀掉占用 8027 端口的进程（PID: $PIDS）"
+    echo "$PIDS" | xargs kill -9
 fi
+rm -f server.pid
 
 # 询问是否为生产环境
 read -r -p ">>> 是否以生产模式启动？[y/N] " IS_PROD
