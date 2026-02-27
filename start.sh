@@ -23,15 +23,31 @@ if [ -f ".env" ]; then
     export $(grep -v '^#' .env | xargs)
 fi
 
-# 提示访问地址
+# 询问是否为生产环境
+read -r -p ">>> 是否为线上生产环境？[y/N] " IS_PROD
+
 echo ""
 echo "=========================================="
 echo "  AIGC Checker Engine 启动中..."
 echo "  访问地址: http://127.0.0.1:8027"
 echo "  API 文档: http://127.0.0.1:8027/docs"
-echo "  按 Ctrl+C 停止服务"
+
+if [[ "$IS_PROD" =~ ^[Yy]$ ]]; then
+    echo "  模式: 生产（后台常驻进程）"
+    echo "  日志: nohup.out"
+    echo "  停止: kill \$(cat server.pid)"
+else
+    echo "  模式: 开发（--reload，按 Ctrl+C 停止）"
+fi
+
 echo "=========================================="
 echo ""
 
-# 启动服务（开发模式加 --reload，生产模式去掉）
-uvicorn main:app --host 0.0.0.0 --port 8027 --reload
+# 启动服务
+if [[ "$IS_PROD" =~ ^[Yy]$ ]]; then
+    nohup uvicorn main:app --host 0.0.0.0 --port 8027 > nohup.out 2>&1 &
+    echo $! > server.pid
+    echo ">>> 服务已在后台启动，PID: $(cat server.pid)"
+else
+    uvicorn main:app --host 0.0.0.0 --port 8027 --reload
+fi
