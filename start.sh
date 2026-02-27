@@ -23,8 +23,27 @@ if [ -f ".env" ]; then
     export $(grep -v '^#' .env | xargs)
 fi
 
+# 检查是否有后台进程在运行
+if [ -f "server.pid" ]; then
+    EXISTING_PID=$(cat server.pid)
+    if kill -0 "$EXISTING_PID" 2>/dev/null; then
+        echo ">>> 检测到后台进程正在运行（PID: $EXISTING_PID）"
+        read -r -p ">>> 是否停止并重新启动？[y/N] " RESTART
+        if [[ "$RESTART" =~ ^[Yy]$ ]]; then
+            kill "$EXISTING_PID" && echo ">>> 已停止旧进程（PID: $EXISTING_PID）"
+            rm -f server.pid
+        else
+            echo ">>> 已取消，保持现有进程运行。"
+            exit 0
+        fi
+    else
+        echo ">>> 发现过期的 server.pid（PID: $EXISTING_PID 已不存在），已清除。"
+        rm -f server.pid
+    fi
+fi
+
 # 询问是否为生产环境
-read -r -p ">>> 是否为线上生产环境？[y/N] " IS_PROD
+read -r -p ">>> 是否以生产模式启动？[y/N] " IS_PROD
 
 echo ""
 echo "=========================================="
