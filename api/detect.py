@@ -1,7 +1,5 @@
 import json
 import os
-from typing import Optional
-
 from fastapi import APIRouter, HTTPException, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
@@ -23,7 +21,7 @@ def _verify_token(credentials: HTTPAuthorizationCredentials = Security(_security
 
 class ScanRequest(BaseModel):
     content: str
-    model: Optional[str] = None  # None 时由 checker 根据 API_SOURCE 决定默认模型
+    model: str = "gpt-4o-mini"
 
 
 @router.post("/scan", dependencies=[Security(_verify_token)])
