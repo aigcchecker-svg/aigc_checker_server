@@ -8,3 +8,4 @@ api/*.pyc
 services/__pycache__
 services/*.pyc
 .DS_Store
+nohup.out

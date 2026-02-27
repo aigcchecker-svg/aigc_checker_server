@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
-from services.checker import run_check
+from services.checker import API_SOURCE, DEFAULT_MODEL, run_check
 
 router = APIRouter()
 
@@ -21,7 +21,8 @@ def _verify_token(credentials: HTTPAuthorizationCredentials = Security(_security
 
 class ScanRequest(BaseModel):
     content: str
-    model: str = "gpt-4o-mini"
+    model: str = DEFAULT_MODEL
+    api_source: str = API_SOURCE
 
 
 @router.post("/scan", dependencies=[Security(_verify_token)])
@@ -35,7 +36,7 @@ async def scan_document(request: ScanRequest):
         )
 
     try:
-        result = await run_check(content=text, model=request.model)
+        result = await run_check(content=text, model=request.model, api_source=request.api_source)
         return result
     except json.JSONDecodeError:
         raise HTTPException(status_code=502, detail="底层引擎返回了无法解析的格式，请重试。")

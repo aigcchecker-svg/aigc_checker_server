@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
 from api.detect import router as detect_router
+from services.checker import API_SOURCE, AZURE_DEFAULT_MODEL, OPENROUTER_DEFAULT_MODEL
 
 app = FastAPI(title="AIGC Checker Engine", version="1.0")
 app.include_router(detect_router, prefix="/api")
@@ -47,6 +48,19 @@ async def get_test_page():
                 <span class="token-status" id="tokenStatus">⬜ 未填写</span>
             </div>
 
+            <div class="token-row">
+                <label>🌐 API Source</label>
+                <select id="apiSource" onchange="onSourceChange()">
+                    <option value="azure">azure</option>
+                    <option value="openrouter">openrouter</option>
+                </select>
+            </div>
+
+            <div class="token-row">
+                <label>🤖 Model</label>
+                <input type="text" id="modelInput" value="__DEFAULT_MODEL__" />
+            </div>
+
             <textarea id="inputText" placeholder="请输入至少 50 个字符的文章进行测试...
 例如：
 The advent of electric vehicles has been touted as a cornerstone in the transition towards sustainable transportation. With global efforts to reduce carbon emissions and mitigate climate change, EVs have gained substantial attention and investment. This paper aims to dissect the multifaceted nature of EVs, weighing their advantages against the inherent limitations."></textarea>
@@ -61,11 +75,18 @@ The advent of electric vehicles has been touted as a cornerstone in the transiti
         </div>
 
         <script>
-            // token 存入 sessionStorage，刷新页面不需重填
+            const DEFAULT_MODELS = { azure: '__AZURE_DEFAULT_MODEL__', openrouter: '__OPENROUTER_DEFAULT_MODEL__' };
+
             window.addEventListener('DOMContentLoaded', () => {
                 const saved = sessionStorage.getItem('api_token');
                 if (saved) { document.getElementById('apiToken').value = saved; updateTokenStatus(); }
+                document.getElementById('apiSource').value = '__API_SOURCE__';
             });
+
+            function onSourceChange() {
+                const source = document.getElementById('apiSource').value;
+                document.getElementById('modelInput').value = DEFAULT_MODELS[source] || '';
+            }
 
             function updateTokenStatus() {
                 const val = document.getElementById('apiToken').value.trim();
@@ -76,6 +97,7 @@ The advent of electric vehicles has been touted as a cornerstone in the transiti
             async function runScan() {
                 const token = document.getElementById('apiToken').value.trim();
                 const text  = document.getElementById('inputText').value.trim();
+                const model = document.getElementById('modelInput').value.trim();
                 const btn   = document.getElementById('scanBtn');
                 const loading   = document.getElementById('loading');
                 const resultBox = document.getElementById('resultBox');
@@ -96,7 +118,7 @@ The advent of electric vehicles has been touted as a cornerstone in the transiti
                             'Content-Type': 'application/json',
                             'Authorization': 'Bearer ' + token
                         },
-                        body: JSON.stringify({ content: text })
+                        body: JSON.stringify({ content: text, model: model || undefined, api_source: document.getElementById('apiSource').value })
                     });
 
                     const data = await response.json();
@@ -116,4 +138,12 @@ The advent of electric vehicles has been touted as a cornerstone in the transiti
     </body>
     </html>
     """
-    return HTMLResponse(content=html_content)
+    default_model = AZURE_DEFAULT_MODEL if API_SOURCE == "azure" else OPENROUTER_DEFAULT_MODEL
+    html = (
+        html_content
+        .replace("__API_SOURCE__", API_SOURCE)
+        .replace("__DEFAULT_MODEL__", default_model)
+        .replace("__AZURE_DEFAULT_MODEL__", AZURE_DEFAULT_MODEL)
+        .replace("__OPENROUTER_DEFAULT_MODEL__", OPENROUTER_DEFAULT_MODEL)
+    )
+    return HTMLResponse(content=html)

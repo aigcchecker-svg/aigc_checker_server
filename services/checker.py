@@ -6,33 +6,38 @@ from openai import AsyncAzureOpenAI, AsyncOpenAI
 
 API_SOURCE = os.getenv("API_SOURCE", "azure").lower()
 
-if API_SOURCE == "azure":
-    _key = os.getenv("AZURE_API_KEY")
-    _endpoint = os.getenv("AZURE_ENDPOINT")
-    if not _key or not _endpoint:
-        raise RuntimeError("Azure 模式需要在 .env 中配置 AZURE_API_KEY 和 AZURE_ENDPOINT")
-
-    AZURE_DEPLOYMENT = os.getenv("AZURE_DEPLOYMENT", "gpt-4o-mini")
-    AZURE_API_VERSION = os.getenv("AZURE_API_VERSION", "2025-01-01-preview")
-
-    client = AsyncAzureOpenAI(
-        api_key=_key,
-        azure_endpoint=_endpoint,
-        api_version=AZURE_API_VERSION,
+# --- Azure ---
+AZURE_DEFAULT_MODEL = os.getenv("AZURE_DEPLOYMENT", "gpt-4o-mini")
+_azure_key = os.getenv("AZURE_API_KEY")
+_azure_endpoint = os.getenv("AZURE_ENDPOINT")
+_azure_client = (
+    AsyncAzureOpenAI(
+        api_key=_azure_key,
+        azure_endpoint=_azure_endpoint,
+        api_version=os.getenv("AZURE_API_VERSION", "2025-01-01-preview"),
     )
+    if _azure_key and _azure_endpoint
+    else None
+)
 
-elif API_SOURCE == "openrouter":
-    _key = os.getenv("OPENROUTER_API_KEY")
-    if not _key:
-        raise RuntimeError("OpenRouter 模式需要在 .env 中配置 OPENROUTER_API_KEY")
+# --- OpenRouter ---
+OPENROUTER_DEFAULT_MODEL = os.getenv("OPENROUTER_MODEL", "anthropic/claude-3.5-haiku")
+_openrouter_key = os.getenv("OPENROUTER_API_KEY")
+_openrouter_client = (
+    AsyncOpenAI(base_url="https://openrouter.ai/api/v1", api_key=_openrouter_key)
+    if _openrouter_key
+    else None
+)
 
-    client = AsyncOpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=_key,
-    )
-
-else:
+# 启动时校验默认 source 已配置
+if API_SOURCE == "azure" and not _azure_client:
+    raise RuntimeError("Azure 模式需要在 .env 中配置 AZURE_API_KEY 和 AZURE_ENDPOINT")
+elif API_SOURCE == "openrouter" and not _openrouter_client:
+    raise RuntimeError("OpenRouter 模式需要在 .env 中配置 OPENROUTER_API_KEY")
+elif API_SOURCE not in ("azure", "openrouter"):
     raise RuntimeError(f"未知的 API_SOURCE='{API_SOURCE}'，只支持 'azure' 或 'openrouter'")
+
+DEFAULT_MODEL = AZURE_DEFAULT_MODEL if API_SOURCE == "azure" else OPENROUTER_DEFAULT_MODEL
 
 
 SYSTEM_PROMPT = """
@@ -83,20 +88,28 @@ SYSTEM_PROMPT = """
 """
 
 
-async def run_check(content: str, model: Optional[str] = None) -> dict:
-    if API_SOURCE == "azure":
-        actual_model = model or AZURE_DEPLOYMENT
-        print(f"Using Azure model: {actual_model}")
+async def run_check(content: str, model: Optional[str] = None, api_source: Optional[str] = None) -> dict:
+    source = (api_source or API_SOURCE).lower()
+
+    if source == "azure":
+        if not _azure_client:
+            raise RuntimeError("Azure 未配置，请检查 AZURE_API_KEY 和 AZURE_ENDPOINT")
+        actual_model = model or AZURE_DEFAULT_MODEL
+        active_client = _azure_client
         extra_headers = {}
+        print(f"Using Azure model: {actual_model}")
     else:
-        actual_model = model or "gpt-4o-mini"
-        print(f"Using OpenRouter model: {actual_model}")
+        if not _openrouter_client:
+            raise RuntimeError("OpenRouter 未配置，请检查 OPENROUTER_API_KEY")
+        actual_model = model or OPENROUTER_DEFAULT_MODEL
+        active_client = _openrouter_client
         extra_headers = {
             "HTTP-Referer": "https://aigcchecker.com",
             "X-Title": "AIGC Checker Detection Engine",
         }
+        print(f"Using OpenRouter model: {actual_model}")
 
-    response = await client.chat.completions.create(
+    response = await active_client.chat.completions.create(
         model=actual_model,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
