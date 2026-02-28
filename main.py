@@ -61,11 +61,19 @@ async def get_test_page():
                 <input type="text" id="modelInput" value="__DEFAULT_MODEL__" />
             </div>
 
+            <div class="token-row">
+                <label>⚙️ Mode</label>
+                <select id="modeSelect" onchange="onModeChange()">
+                    <option value="detect">detect（AI 检测）</option>
+                    <option value="reduce">reduce（降 AI 改写）</option>
+                </select>
+            </div>
+
             <textarea id="inputText" placeholder="请输入至少 50 个字符的文章进行测试...
 例如：
 The advent of electric vehicles has been touted as a cornerstone in the transition towards sustainable transportation. With global efforts to reduce carbon emissions and mitigate climate change, EVs have gained substantial attention and investment. This paper aims to dissect the multifaceted nature of EVs, weighing their advantages against the inherent limitations."></textarea>
 
-            <button onclick="runScan()" id="scanBtn">发起 API 检测请求</button>
+            <button onclick="runScan()" id="scanBtn">发起 AI 检测请求</button>
             <div id="loading">⏳ 正在连线大模型进行分析，请稍候...</div>
 
             <div id="resultBox" class="result-box">
@@ -86,6 +94,12 @@ The advent of electric vehicles has been touted as a cornerstone in the transiti
             function onSourceChange() {
                 const source = document.getElementById('apiSource').value;
                 document.getElementById('modelInput').value = DEFAULT_MODELS[source] || '';
+            }
+
+            function onModeChange() {
+                const mode = document.getElementById('modeSelect').value;
+                document.getElementById('scanBtn').textContent =
+                    mode === 'reduce' ? '发起降 AI 改写请求' : '发起 AI 检测请求';
             }
 
             function updateTokenStatus() {
@@ -111,8 +125,11 @@ The advent of electric vehicles has been touted as a cornerstone in the transiti
                 resultBox.style.display = 'none';
                 jsonOutput.textContent = '';
 
+                const mode = document.getElementById('modeSelect').value;
+                const endpoint = mode === 'reduce' ? '/api/reduce' : '/api/scan';
+
                 try {
-                    const response = await fetch('/api/scan', {
+                    const response = await fetch(endpoint, {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',

@@ -88,7 +88,43 @@ SYSTEM_PROMPT = """
 """
 
 
-async def run_check(content: str, model: Optional[str] = None, api_source: Optional[str] = None) -> dict:
+REDUCE_SYSTEM_PROMPT = """
+你是一位顶尖的文字润色专家，擅长将 AI 生成痕迹明显的文本改写为更具人类写作风格的内容。
+
+【你的任务】
+用户会提供一段文本，你需要：
+1. 识别其中 AI 写作痕迹明显的句子或片段（如过于整齐的结构、典型 AI 高频词、过度书面化的表达等）
+2. 对这些片段进行自然化改写，使其更像人类写作风格（可适当引入轻微不规整、口语化词汇、多样句式）
+3. 未识别为 AI 痕迹明显的部分，保持原文不变
+4. 记录每处修改的原始内容、改写内容和改写原因
+
+【改写原则】
+- 保留原文的核心语义和信息，不得改变事实
+- 优先调整句式结构、替换 AI 高频词汇、打破过度规整的排比
+- 改写幅度适中，不要过度口语化，保持文本的基本专业性
+- 如果原文整体已经较像人类写作，可以只做少量调整
+
+请严格按照以下 JSON 结构输出（不要包含 ```json 等 Markdown 标记，直接输出合法的 JSON 对象）：
+{
+  "original": "用户提供的原始完整文本（原样复制，不做任何修改）",
+  "reduced": "经过改写后的完整文本",
+  "changes": [
+    {
+      "original": "被修改的原始片段",
+      "revised": "改写后的片段",
+      "reason": "改写原因说明"
+    }
+  ]
+}
+"""
+
+
+async def _call_llm(
+    prompt: str,
+    system: str,
+    model: Optional[str] = None,
+    api_source: Optional[str] = None,
+) -> dict:
     source = (api_source or API_SOURCE).lower()
 
     if source == "azure":
@@ -112,8 +148,8 @@ async def run_check(content: str, model: Optional[str] = None, api_source: Optio
     response = await active_client.chat.completions.create(
         model=actual_model,
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": content},
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
         ],
         response_format={"type": "json_object"},
         temperature=0.1,
@@ -122,3 +158,11 @@ async def run_check(content: str, model: Optional[str] = None, api_source: Optio
 
     raw_content = response.choices[0].message.content
     return json.loads(raw_content)
+
+
+async def run_check(content: str, model: Optional[str] = None, api_source: Optional[str] = None) -> dict:
+    return await _call_llm(content, SYSTEM_PROMPT, model=model, api_source=api_source)
+
+
+async def run_reduce(content: str, model: Optional[str] = None, api_source: Optional[str] = None) -> dict:
+    return await _call_llm(content, REDUCE_SYSTEM_PROMPT, model=model, api_source=api_source)
