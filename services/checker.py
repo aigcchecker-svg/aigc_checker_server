@@ -106,8 +106,11 @@ REDUCE_SYSTEM_PROMPT = """
 
 请严格按照以下 JSON 结构输出（不要包含 ```json 等 Markdown 标记，直接输出合法的 JSON 对象）：
 {
-  "original": "用户提供的原始完整文本（原样复制，不做任何修改）",
   "reduced": "经过改写后的完整文本",
+  "ai_probability": "85.50",         // 原文 AI 生成概率（0-100，保留两位小数的字符串，如 "85.50"）
+  "ai_reduced_probability": "23.10", // 改写后预估 AI 概率（0-100，保留两位小数的字符串，如 "23.10"）
+  "quality_score": 82.00,            // 改写质量评分（0-100，保留两位小数的浮点数）：综合评估语义保留度、自然度、流畅性
+  "model": "moderate",               // 本次改写所采用的策略，只能是 "light"（轻度润色）、"moderate"（适度改写）、"deep"（深度重构）之一，根据实际改写幅度自动选择
   "changes": [
     {
       "original": "被修改的原始片段",
