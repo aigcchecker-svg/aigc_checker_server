@@ -1,5 +1,6 @@
 import json
 import os
+from datetime import datetime
 from fastapi import APIRouter, HTTPException, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
@@ -36,6 +37,9 @@ async def scan_document(request: ScanRequest):
         )
 
     try:
+        # 执行之前 先 log 记录 到 nohup.out 文件中 使用的 model \api_source \ content 字符数 \ 请求时间
+        with open("nohup.out", "a") as f:
+            f.write(f"[scan] model: {request.model}, api_source: {request.api_source}, 字符数: {len(text)}, 请求时间: {datetime.now()}\n")
         result = await run_check(content=text, model=request.model, api_source=request.api_source)
         return result
     except json.JSONDecodeError:
@@ -55,6 +59,8 @@ async def reduce_document(request: ScanRequest):
         )
 
     try:
+        with open("nohup.out", "a") as f:
+            f.write(f"[reduce] model: {request.model}, api_source: {request.api_source}, 字符数: {len(text)}, 请求时间: {datetime.now()}\n")
         result = await run_reduce(content=text, model=request.model, api_source=request.api_source)
         return result
     except json.JSONDecodeError:
