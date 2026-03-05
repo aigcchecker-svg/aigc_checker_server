@@ -22,7 +22,7 @@ _azure_client = (
 )
 
 # --- OpenRouter ---
-OPENROUTER_DEFAULT_MODEL = os.getenv("OPENROUTER_MODEL", "anthropic/claude-3.5-haiku")
+OPENROUTER_DEFAULT_MODEL = os.getenv("OPENROUTER_MODEL", "claude-3.5-haiku")
 _openrouter_key = os.getenv("OPENROUTER_API_KEY")
 _openrouter_client = (
     AsyncOpenAI(base_url="https://openrouter.ai/api/v1", api_key=_openrouter_key)
@@ -38,14 +38,12 @@ PROXY_BASE_URL = os.getenv("PROXY_BASE_URL", "http://119.28.110.115:5000")
 PROXY_TOKEN = os.getenv("PROXY_TOKEN", "10a8ed53-e497-4f59-9662-0c650dd889ff")
 
 # 启动时校验默认 source 已配置
+if API_SOURCE not in ("azure", "openrouter"):
+    raise RuntimeError(f"未知的 API_SOURCE='{API_SOURCE}'，只支持 'azure' 或 'openrouter'")
 if API_SOURCE == "azure" and not _azure_client:
     raise RuntimeError("Azure 模式需要在 .env 中配置 AZURE_API_KEY 和 AZURE_ENDPOINT")
-elif API_SOURCE == "openrouter" and not _openrouter_client:
-    raise RuntimeError("OpenRouter 模式需要在 .env 中配置 OPENROUTER_API_KEY")
-elif API_SOURCE not in ("azure", "openrouter"):
-    raise RuntimeError(f"未知的 API_SOURCE='{API_SOURCE}'，只支持 'azure' 或 'openrouter'")
-
-DEFAULT_MODEL = AZURE_DEFAULT_MODEL if API_SOURCE == "azure" else OPENROUTER_DEFAULT_MODEL
+if API_SOURCE == "openrouter" and OPENROUTER_SEND_MODE == "self" and not _openrouter_client:
+    raise RuntimeError("OpenRouter(self) 模式需要在 .env 中配置 OPENROUTER_API_KEY")
 
 
 SYSTEM_PROMPT = """
