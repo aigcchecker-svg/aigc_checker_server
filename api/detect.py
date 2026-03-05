@@ -23,7 +23,7 @@ def _verify_token(credentials: HTTPAuthorizationCredentials = Security(_security
 class ScanRequest(BaseModel):
     content: str
     model: str = DEFAULT_MODEL
-    api_source: str = API_SOURCE
+    api_source: str = API_SOURCE  # 定义 api_source 的 可以 为 azure  openrouter 两个值 默认是 azure
 
 
 @router.post("/scan", dependencies=[Security(_verify_token)])

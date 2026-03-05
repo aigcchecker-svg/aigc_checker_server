@@ -2,6 +2,7 @@ import json
 import os
 from typing import Optional
 
+import httpx
 from openai import AsyncAzureOpenAI, AsyncOpenAI
 
 API_SOURCE = os.getenv("API_SOURCE", "azure").lower()
@@ -28,6 +29,13 @@ _openrouter_client = (
     if _openrouter_key
     else None
 )
+
+# --- OpenRouter 发送方式 ---
+# "self"  : 直接调用 _openrouter_client（默认）
+# "proxy" : 通过内部代理服务器中转（参考 PHP chat() 实现）
+OPENROUTER_SEND_MODE = os.getenv("OPENROUTER_SEND_MODE", "self").lower()
+PROXY_BASE_URL = os.getenv("PROXY_BASE_URL", "http://119.28.110.115:5000")
+PROXY_TOKEN = os.getenv("PROXY_TOKEN", "10a8ed53-e497-4f59-9662-0c650dd889ff")
 
 # 启动时校验默认 source 已配置
 if API_SOURCE == "azure" and not _azure_client:
@@ -127,6 +135,23 @@ REDUCE_SYSTEM_PROMPT = """
 """
 
 
+async def _send_by_proxy(messages: list, engine: str, model: str) -> str:
+    """通过内部代理服务器发送请求，返回 LLM 的原始文本响应。"""
+    url = f"{PROXY_BASE_URL}/api/chats/{engine}/{model}"
+    payload = {
+        "messages": messages,
+        "token": PROXY_TOKEN,
+        "version": 0,
+    }
+    async with httpx.AsyncClient(timeout=None) as client:
+        res = await client.post(url, json=payload)
+        res.raise_for_status()
+        data = res.json()
+    if data.get("errno") != 0:
+        raise RuntimeError(f"Proxy error: {data.get('message', 'unknown error')}")
+    return data["re"]
+
+
 async def _call_llm(
     prompt: str,
     system: str,
@@ -134,37 +159,44 @@ async def _call_llm(
     api_source: Optional[str] = None,
 ) -> dict:
     source = (api_source or API_SOURCE).lower()
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": prompt},
+    ]
 
     if source == "azure":
         if not _azure_client:
             raise RuntimeError("Azure 未配置，请检查 AZURE_API_KEY 和 AZURE_ENDPOINT")
         actual_model = model or AZURE_DEFAULT_MODEL
-        active_client = _azure_client
-        extra_headers = {}
         print(f"Using Azure model: {actual_model}")
+        response = await _azure_client.chat.completions.create(
+            model=actual_model,
+            messages=messages,
+            response_format={"type": "json_object"},
+            temperature=0.1,
+        )
+        raw_content = response.choices[0].message.content
     else:
-        if not _openrouter_client:
-            raise RuntimeError("OpenRouter 未配置，请检查 OPENROUTER_API_KEY")
         actual_model = model or OPENROUTER_DEFAULT_MODEL
-        active_client = _openrouter_client
-        extra_headers = {
-            "HTTP-Referer": "https://aigcchecker.com",
-            "X-Title": "AIGC Checker Detection Engine",
-        }
-        print(f"Using OpenRouter model: {actual_model}")
+        if OPENROUTER_SEND_MODE == "proxy":
+            print(f"Using OpenRouter model (proxy): {actual_model}")
+            raw_content = await _send_by_proxy(messages, "openrouter", actual_model)
+        else:
+            if not _openrouter_client:
+                raise RuntimeError("OpenRouter 未配置，请检查 OPENROUTER_API_KEY")
+            print(f"Using OpenRouter model (self): {actual_model}")
+            response = await _openrouter_client.chat.completions.create(
+                model=actual_model,
+                messages=messages,
+                response_format={"type": "json_object"},
+                temperature=0.1,
+                extra_headers={
+                    "HTTP-Referer": "https://aigcchecker.com",
+                    "X-Title": "AIGC Checker Detection Engine",
+                },
+            )
+            raw_content = response.choices[0].message.content
 
-    response = await active_client.chat.completions.create(
-        model=actual_model,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": prompt},
-        ],
-        response_format={"type": "json_object"},
-        temperature=0.1,
-        extra_headers=extra_headers,
-    )
-
-    raw_content = response.choices[0].message.content
     return json.loads(raw_content)
 
 
