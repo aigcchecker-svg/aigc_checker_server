@@ -1,9 +1,20 @@
 import json
+import logging
 import os
 from typing import Optional
 
 import httpx
 from openai import AsyncAzureOpenAI, AsyncOpenAI
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.FileHandler("nohup.out", encoding="utf-8"),
+        logging.StreamHandler(),
+    ],
+)
+logger = logging.getLogger(__name__)
 
 API_SOURCE = os.getenv("API_SOURCE", "azure").lower()
 
@@ -166,7 +177,7 @@ async def _call_llm(
         if not _azure_client:
             raise RuntimeError("Azure 未配置，请检查 AZURE_API_KEY 和 AZURE_ENDPOINT")
         actual_model = model or AZURE_DEFAULT_MODEL
-        print(f"Using Azure model: {actual_model}")
+        logger.info("Using Azure model: %s", actual_model)
         response = await _azure_client.chat.completions.create(
             model=actual_model,
             messages=messages,
@@ -177,12 +188,12 @@ async def _call_llm(
     else:
         actual_model = model or OPENROUTER_DEFAULT_MODEL
         if OPENROUTER_SEND_MODE == "proxy":
-            print(f"Using OpenRouter model (proxy): {actual_model}")
+            logger.info("Using OpenRouter model (proxy): %s", actual_model)
             raw_content = await _send_by_proxy(messages, "openrouter", actual_model)
         else:
             if not _openrouter_client:
                 raise RuntimeError("OpenRouter 未配置，请检查 OPENROUTER_API_KEY")
-            print(f"Using OpenRouter model (self): {actual_model}")
+            logger.info("Using OpenRouter model (self): %s", actual_model)
             response = await _openrouter_client.chat.completions.create(
                 model=actual_model,
                 messages=messages,

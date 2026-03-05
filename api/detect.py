@@ -1,5 +1,5 @@
+import logging
 import os
-from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Security
@@ -7,6 +7,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
 from services.checker import API_SOURCE, run_check, run_reduce
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -28,13 +30,7 @@ class ScanRequest(BaseModel):
 
 
 def _log(tag: str, request: ScanRequest, text_len: int) -> None:
-    with open("nohup.out", "a") as f:
-        f.write(
-            f"[{tag}] model: {request.model or 'default'}, "
-            f"api_source: {request.api_source}, "
-            f"字符数: {text_len}, "
-            f"请求时间: {datetime.now()}\n"
-        )
+    logger.info("[%s] model: %s, api_source: %s, 字符数: %d", tag, request.model or "default", request.api_source, text_len)
 
 
 @router.post("/scan", dependencies=[Security(_verify_token)])
