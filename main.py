@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
 from api.detect import router as detect_router
-from services.checker import API_SOURCE, AZURE_DEFAULT_MODEL, OPENROUTER_DEFAULT_MODEL
+from services.checker import API_SOURCE, AZURE_DEFAULT_MODEL, OLLAMA_DEFAULT_MODEL, OPENROUTER_DEFAULT_MODEL
 
 app = FastAPI(title="AIGC Checker Engine", version="1.0")
 app.include_router(detect_router, prefix="/api")
@@ -51,6 +51,7 @@ async def get_test_page():
             <div class="token-row">
                 <label>🌐 API Source</label>
                 <select id="apiSource" onchange="onSourceChange()">
+                    <option value="ollama">ollama</option>
                     <option value="azure">azure</option>
                     <option value="openrouter">openrouter</option>
                 </select>
@@ -83,7 +84,11 @@ The advent of electric vehicles has been touted as a cornerstone in the transiti
         </div>
 
         <script>
-            const DEFAULT_MODELS = { azure: '__AZURE_DEFAULT_MODEL__', openrouter: '__OPENROUTER_DEFAULT_MODEL__' };
+            const DEFAULT_MODELS = {
+                ollama: '__OLLAMA_DEFAULT_MODEL__',
+                azure: '__AZURE_DEFAULT_MODEL__',
+                openrouter: '__OPENROUTER_DEFAULT_MODEL__'
+            };
 
             window.addEventListener('DOMContentLoaded', () => {
                 const saved = sessionStorage.getItem('api_token');
@@ -155,11 +160,16 @@ The advent of electric vehicles has been touted as a cornerstone in the transiti
     </body>
     </html>
     """
-    default_model = AZURE_DEFAULT_MODEL if API_SOURCE == "azure" else OPENROUTER_DEFAULT_MODEL
+    default_model = (
+        OLLAMA_DEFAULT_MODEL if API_SOURCE == "ollama"
+        else AZURE_DEFAULT_MODEL if API_SOURCE == "azure"
+        else OPENROUTER_DEFAULT_MODEL
+    )
     html = (
         html_content
         .replace("__API_SOURCE__", API_SOURCE)
         .replace("__DEFAULT_MODEL__", default_model)
+        .replace("__OLLAMA_DEFAULT_MODEL__", OLLAMA_DEFAULT_MODEL)
         .replace("__AZURE_DEFAULT_MODEL__", AZURE_DEFAULT_MODEL)
         .replace("__OPENROUTER_DEFAULT_MODEL__", OPENROUTER_DEFAULT_MODEL)
     )
