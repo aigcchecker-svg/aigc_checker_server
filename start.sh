@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
 # 切换到脚本所在目录（serverapi/）
 cd "$(dirname "$0")"
@@ -15,16 +15,19 @@ source .venv/bin/activate
 
 # 安装/更新依赖
 echo ">>> 安装依赖..."
-pip install -q -r requirements.txt
+python -m pip install -q -r requirements.txt
 
 # 加载 .env 文件（如果存在）
 if [ -f ".env" ]; then
     echo ">>> 加载 .env 配置..."
-    export $(grep -v '^#' .env | xargs)
+    set -a
+    # shellcheck disable=SC1091
+    source .env
+    set +a
 fi
 
 # 杀掉占用 8027 端口的所有进程
-PIDS=$(lsof -ti :8027 2>/dev/null)
+PIDS=$(lsof -ti :8027 2>/dev/null || true)
 if [ -n "$PIDS" ]; then
     echo ">>> 杀掉占用 8027 端口的进程（PID: $PIDS）"
     echo "$PIDS" | xargs kill -9
@@ -32,7 +35,13 @@ fi
 rm -f server.pid
 
 # 询问是否为生产环境
-read -r -p ">>> 是否以生产模式启动？[y/N] " IS_PROD
+IS_PROD="${IS_PROD:-}"
+if [ -t 0 ]; then
+    read -r -p ">>> 是否以生产模式启动？[y/N] " IS_PROD || true
+else
+    IS_PROD="${IS_PROD:-N}"
+    echo ">>> 未检测到交互终端，默认以开发模式启动（可通过 IS_PROD=y 覆盖）"
+fi
 
 echo ""
 echo "=========================================="
@@ -57,5 +66,5 @@ if [[ "$IS_PROD" =~ ^[Yy]$ ]]; then
     echo $! > server.pid
     echo ">>> 服务已在后台启动，PID: $(cat server.pid)"
 else
-    uvicorn main:app --host 0.0.0.0 --port 8027 --reload
+    exec uvicorn main:app --host 0.0.0.0 --port 8027 --reload
 fi
