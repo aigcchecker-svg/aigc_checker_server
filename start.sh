@@ -27,10 +27,11 @@ if [ -f ".env" ]; then
 fi
 
 # 杀掉占用 8027 端口的所有进程
-PIDS=$(lsof -ti :8027 2>/dev/null || true)
-if [ -n "$PIDS" ]; then
-    echo ">>> 杀掉占用 8027 端口的进程（PID: $PIDS）"
-    echo "$PIDS" | xargs kill -9
+PIDS=""
+PIDS="$(lsof -ti :8027 2>/dev/null || true)"
+if [ -n "${PIDS:-}" ]; then
+    echo ">>> 杀掉占用 8027 端口的进程（PID: ${PIDS:-}）"
+    echo "${PIDS:-}" | xargs kill -9
 fi
 rm -f server.pid
 
