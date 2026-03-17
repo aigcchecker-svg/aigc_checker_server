@@ -11,10 +11,16 @@ logger = logging.getLogger(__name__)
 
 
 def _clamp(value: float, low: float, high: float) -> float:
+    """将 value 限定在 [low, high] 区间内。"""
     return max(low, min(high, value))
 
 
 def _heuristic_fallback(features: dict, genre: str) -> dict:
+    """当 LLM 调用失败时的纯统计启发式兜底方案，仅使用文本特征计算 AI 概率。
+
+    使用与 aggregate._feature_score 类似的信号，但权重略有调整，
+    confidence 固定为 0.38（低置信度），以提示调用方结果可靠性较低。
+    """
     burstiness = features.get("burstiness", 0.0)
     sentence_std = features.get("sentence_length_std", 0.0)
     repeated = features.get("repeated_ngram_ratio", 0.0)
@@ -35,8 +41,10 @@ def _heuristic_fallback(features: dict, genre: str) -> dict:
         + 0.10 * (1 - human_detail)
     )
 
+    # 正式文体保守降分，与 aggregate 层策略保持一致
     if genre in {"business_doc", "academic", "list_or_table"}:
         score -= 8
+    # 具体细节越多，降分越多（最多 -12）
     if detail >= 3:
         score -= min(12, detail * 2)
 
@@ -56,7 +64,7 @@ def _heuristic_fallback(features: dict, genre: str) -> dict:
 
     return {
         "ai_score": round(score, 2),
-        "confidence": 0.38,
+        "confidence": 0.38,  # 启发式兜底固定低置信度，提示调用方结果仅供参考
         "signals": {
             "over_smooth": round(over_smooth, 4),
             "template_pattern": round(template_pattern, 4),
@@ -74,6 +82,11 @@ async def judge_chunk_with_qwen(
     features: dict,
     model: str | None = None,
 ) -> dict:
+    """调用 Qwen（本地 Ollama）对单个分块进行风格判断，返回 QwenJudgeResult dict。
+
+    将预提取的统计特征作为上下文随 Prompt 一起发送，帮助模型更准确地判断风格倾向。
+    若 LLM 调用失败（超时/格式异常等），自动降级为 _heuristic_fallback，不影响主流程。
+    """
     schema = QwenJudgeResult.model_json_schema()
     user_prompt = f"""
 请分析下面这个文本分块，只基于风格和语言行为判断 AI 倾向。
@@ -104,9 +117,11 @@ async def judge_chunk_with_qwen(
             schema=schema,
             model=model,
         )
+        # 用 Pydantic 校验模型返回格式，字段缺失或类型不符时会抛出 ValidationError
         validated = QwenJudgeResult.model_validate(data)
         return validated.model_dump()
     except Exception as exc:
+        # LLM 调用失败（超时、格式错误等），降级为启发式规则，记录警告日志
         logger.warning("Qwen judge fallback triggered: %s", exc)
         return _heuristic_fallback(features, genre)
 

@@ -22,9 +22,11 @@ OLLAMA_TIMEOUT = float(os.getenv("OLLAMA_TIMEOUT", "120"))
 
 
 def _extract_json(text: str) -> dict[str, Any]:
+    """从 Ollama 响应字符串中提取 JSON，直接解析失败时用正则匹配第一个 {...} 块。"""
     try:
         return json.loads(text)
     except json.JSONDecodeError:
+        # Ollama 偶尔在 JSON 前后附加思考过程文字，用正则兜底
         match = re.search(r"\{.*\}", text, re.DOTALL)
         if not match:
             raise
@@ -32,14 +34,21 @@ def _extract_json(text: str) -> dict[str, Any]:
 
 
 async def _post_generate(payload: dict) -> str:
+    """向 Ollama /api/generate 发送请求，返回响应文本。
+
+    优先使用 httpx 异步客户端（推荐）；若未安装则通过线程池调用 urllib 同步版本。
+    响应为空时抛出 RuntimeError，防止后续 JSON 解析静默失败。
+    """
     url = f"{OLLAMA_BASE_URL}/api/generate"
     if httpx is not None:
+        # connect 超时独立设置为 10s，避免网络问题长时间阻塞
         timeout = httpx.Timeout(OLLAMA_TIMEOUT, connect=10.0)
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(url, json=payload)
             response.raise_for_status()
             data = response.json()
     else:
+        # httpx 未安装时降级为 urllib，需通过线程池避免阻塞事件循环
         data = await asyncio.to_thread(_post_generate_via_urllib, url, payload)
 
     result = data.get("response", "")
@@ -49,6 +58,7 @@ async def _post_generate(payload: dict) -> str:
 
 
 def _post_generate_via_urllib(url: str, payload: dict) -> dict[str, Any]:
+    """urllib 同步版本的 Ollama 请求，在线程池中运行，作为 httpx 不可用时的兜底。"""
     body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(request, timeout=OLLAMA_TIMEOUT) as response:
@@ -57,13 +67,18 @@ def _post_generate_via_urllib(url: str, payload: dict) -> dict[str, Any]:
 
 
 async def generate_json(system_prompt: str, user_prompt: str, schema: dict, model: str | None = None) -> dict:
+    """调用 Ollama 生成结构化 JSON 响应，通过 format 字段传入 JSON Schema 约束输出格式。
+
+    temperature 设为 0.1 以确保输出尽可能确定（适合评分场景）。
+    异常时重新抛出 RuntimeError，由调用方决定是否降级为启发式方法。
+    """
     actual_model = model or OLLAMA_DEFAULT_MODEL
     payload = {
         "model": actual_model,
         "system": system_prompt,
         "prompt": user_prompt,
         "stream": False,
-        "format": schema,
+        "format": schema,  # 通过 format 字段强制 Ollama 按 Schema 输出 JSON
         "options": {"temperature": 0.1},
     }
     logger.info("Calling Ollama JSON model=%s", actual_model)
@@ -76,6 +91,10 @@ async def generate_json(system_prompt: str, user_prompt: str, schema: dict, mode
 
 
 async def generate_text(system_prompt: str, user_prompt: str, model: str | None = None) -> str:
+    """调用 Ollama 生成纯文本响应（不使用 Schema 约束）。
+
+    temperature 设为 0.3，比 JSON 模式略高，允许适度的表达多样性（适合改写场景）。
+    """
     actual_model = model or OLLAMA_DEFAULT_MODEL
     payload = {
         "model": actual_model,

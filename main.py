@@ -14,6 +14,7 @@ app.include_router(detect_router, prefix="/api")
 
 @app.get("/", response_class=HTMLResponse)
 async def get_test_page():
+    """返回内部测试用的 HTML 页面，支持 Token 认证、API Source 切换、检测/降 AI 改写两种模式。"""
     html_content = """
     <!DOCTYPE html>
     <html lang="zh-CN">
@@ -160,11 +161,13 @@ The advent of electric vehicles has been touted as a cornerstone in the transiti
     </body>
     </html>
     """
+    # 根据当前配置的 API_SOURCE 确定页面默认显示的模型名
     default_model = (
         OLLAMA_DEFAULT_MODEL if API_SOURCE == "ollama"
         else AZURE_DEFAULT_MODEL if API_SOURCE == "azure"
         else OPENROUTER_DEFAULT_MODEL
     )
+    # 将 HTML 模板中的占位符替换为实际运行时配置值，再返回给浏览器
     html = (
         html_content
         .replace("__API_SOURCE__", API_SOURCE)
