@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from collections import Counter
-
 from services.calibration import calibrate_chunk_score, calibrate_document_score
 
 
@@ -28,8 +26,8 @@ def _confidence_label(confidence: float) -> str:
     return "low"
 
 
-def _feature_score(features: dict) -> tuple[float, list[str]]:
-    """基于统计特征计算 AI 概率分数（0-100）及对应的文字原因列表。
+def _feature_score(features: dict) -> float:
+    """基于统计特征计算 AI 概率分数（0-100）。
 
     各信号含义：
     - uniformity：句长均匀程度（高 → 偏 AI）
@@ -70,17 +68,7 @@ def _feature_score(features: dict) -> tuple[float, list[str]]:
         + 0.10 * (1 - human_detail)
     )
 
-    reasons: list[str] = []
-    if uniformity > 0.72:
-        reasons.append("句长波动较小，整体节奏偏均匀。")
-    if repeat_signal > 0.45:
-        reasons.append("重复片段比例偏高，存在模板化复用迹象。")
-    if lexical_signal > 0.55:
-        reasons.append("词汇变化度偏低，表达较集中。")
-    if human_detail > 0.45:
-        reasons.append("检测到较多具体时间、数字或执行约束，偏向人工写作。")
-
-    return score, reasons
+    return score
 
 
 def _style_score(qwen_result: dict) -> float:
@@ -124,7 +112,7 @@ def score_chunk(features: dict, qwen_result: dict, genre: str) -> dict:
     权重组合：Qwen LLM 55% + 统计特征 30% + 风格信号 15%。
     之后按文体、细节数量、列表比例等维度做规则校正，短文本额外降低置信度。
     """
-    feature_score, feature_reasons = _feature_score(features)
+    feature_score = _feature_score(features)
     style_score = _style_score(qwen_result)
     qwen_score = float(qwen_result.get("ai_score", 0.0))
 
@@ -174,18 +162,10 @@ def score_chunk(features: dict, qwen_result: dict, genre: str) -> dict:
         1,
     )
 
-    # 合并原因，LLM 原因在前，去重后最多保留 6 条
-    reasons = list(dict.fromkeys(qwen_result.get("reasons", []) + feature_reasons))
-    if genre in {"business_doc", "academic", "list_or_table"}:
-        reasons.append("当前文体天然偏正式，规则层已额外降低误判。")
-    if features.get("char_count", 0) < 120:
-        reasons.append("分块较短，本段判断置信度已自动下调。")
-
     return {
         "ai_score": round(final_score, 2),
         "label": _map_label(final_score),
         "confidence": round(confidence, 4),
-        "reasons": reasons[:6],
         "score_breakdown": {
             "feature_score": round(feature_score, 2),
             "qwen_score": round(qwen_score, 2),
@@ -222,13 +202,6 @@ def aggregate_document(chunks: list[dict], genre: str, doc_features: dict) -> di
     # 高风险分块：ai_score >= 65 的分块 ID 列表，用于指导改写优先级
     high_risk_chunks = [chunk["chunk_id"] for chunk in chunks if chunk.get("ai_score", 0) >= 65]
 
-    # 统计各原因出现频次，取前 5 条作为文档摘要原因
-    reason_counter = Counter()
-    for chunk in chunks:
-        for reason in chunk.get("reasons", []):
-            reason_counter[reason] += 1
-    summary_reasons = [reason for reason, _ in reason_counter.most_common(5)]
-
     metrics = {
         "perplexity": doc_features.get("pseudo_perplexity"),
         "burstiness": doc_features.get("burstiness"),
@@ -255,7 +228,6 @@ def aggregate_document(chunks: list[dict], genre: str, doc_features: dict) -> di
         "chunks": chunks,
         "analysis": {
             "high_risk_chunks": high_risk_chunks,
-            "summary_reasons": summary_reasons,
             "genre": genre,
         },
         "summary": {
@@ -269,4 +241,3 @@ def aggregate_document(chunks: list[dict], genre: str, doc_features: dict) -> di
             "words": doc_features.get("suspicious_terms", [])[:10],
         },
     }
-

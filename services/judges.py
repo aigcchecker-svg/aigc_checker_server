@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import json
 
 from services.ollama_client import generate_json
 from services.prompts import QWEN_CHUNK_SYSTEM_PROMPT
@@ -8,6 +9,28 @@ from services.schemas import QwenJudgeResult
 
 
 logger = logging.getLogger(__name__)
+
+_QWEN_JUDGE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "ai_score": {"type": "number", "minimum": 0, "maximum": 100},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "signals": {
+            "type": "object",
+            "properties": {
+                "over_smooth": {"type": "number", "minimum": 0, "maximum": 1},
+                "template_pattern": {"type": "number", "minimum": 0, "maximum": 1},
+                "sentence_uniformity": {"type": "number", "minimum": 0, "maximum": 1},
+                "human_detail": {"type": "number", "minimum": 0, "maximum": 1},
+            },
+            "required": ["over_smooth", "template_pattern", "sentence_uniformity", "human_detail"],
+            "additionalProperties": False,
+        },
+        "label": {"type": "string", "enum": ["human", "mixed", "ai"]},
+    },
+    "required": ["ai_score", "confidence", "signals", "label"],
+    "additionalProperties": False,
+}
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -50,18 +73,6 @@ def _heuristic_fallback(features: dict, genre: str) -> dict:
 
     score = _clamp(score, 0, 100)
     label = "ai" if score >= 70 else "mixed" if score >= 40 else "human"
-    reasons = []
-    if over_smooth > 0.7:
-        reasons.append("句式节奏偏平滑，语言行为较稳定。")
-    if template_pattern > 0.45:
-        reasons.append("重复 n-gram 偏多，存在模板化痕迹。")
-    if human_detail > 0.45:
-        reasons.append("文本包含较多真实细节，降低纯 AI 判定。")
-    if genre in {"business_doc", "academic", "list_or_table"}:
-        reasons.append("当前文体本身较规整，按保守策略避免误判。")
-    if not reasons:
-        reasons.append("未观察到足够强的单侧证据，结果偏保守。")
-
     return {
         "ai_score": round(score, 2),
         "confidence": 0.38,  # 启发式兜底固定低置信度，提示调用方结果仅供参考
@@ -71,7 +82,6 @@ def _heuristic_fallback(features: dict, genre: str) -> dict:
             "sentence_uniformity": round(sentence_uniformity, 4),
             "human_detail": round(human_detail, 4),
         },
-        "reasons": reasons[:4],
         "label": label,
     }
 
@@ -87,34 +97,30 @@ async def judge_chunk_with_qwen(
     将预提取的统计特征作为上下文随 Prompt 一起发送，帮助模型更准确地判断风格倾向。
     若 LLM 调用失败（超时/格式异常等），自动降级为 _heuristic_fallback，不影响主流程。
     """
-    schema = QwenJudgeResult.model_json_schema()
-    user_prompt = f"""
-请分析下面这个文本分块，只基于风格和语言行为判断 AI 倾向。
-
-文体: {genre}
-程序特征摘要:
-- char_count: {features.get("char_count")}
-- sentence_count: {features.get("sentence_count")}
-- avg_sentence_length: {features.get("avg_sentence_length")}
-- sentence_length_std: {features.get("sentence_length_std")}
-- burstiness: {features.get("burstiness")}
-- lexical_diversity: {features.get("lexical_diversity")}
-- repeated_ngram_ratio: {features.get("repeated_ngram_ratio")}
-- punctuation_density: {features.get("punctuation_density")}
-- connector_density: {features.get("connector_density")}
-- paragraph_length_variance: {features.get("paragraph_length_variance")}
-- detail_signal_count: {features.get("detail_signal_count")}
-- list_line_ratio: {features.get("list_line_ratio")}
-
-文本分块:
-{chunk_text}
-""".strip()
+    compact_features = {
+        "c": features.get("char_count"),
+        "s": features.get("sentence_count"),
+        "asl": features.get("avg_sentence_length"),
+        "std": features.get("sentence_length_std"),
+        "b": features.get("burstiness"),
+        "lex": features.get("lexical_diversity"),
+        "rep": features.get("repeated_ngram_ratio"),
+        "conn": features.get("connector_density"),
+        "detail": features.get("detail_signal_count"),
+        "list": features.get("list_line_ratio"),
+    }
+    user_prompt = (
+        f"文体={genre}\n"
+        f"特征={json.dumps(compact_features, ensure_ascii=False, separators=(',', ':'))}\n"
+        f"文本={chunk_text}\n"
+        "只输出 JSON，不要解释，不要 reasons，不要 markdown。"
+    )
 
     try:
         data = await generate_json(
             system_prompt=QWEN_CHUNK_SYSTEM_PROMPT,
             user_prompt=user_prompt,
-            schema=schema,
+            schema=_QWEN_JUDGE_SCHEMA,
             model=model,
         )
         # 用 Pydantic 校验模型返回格式，字段缺失或类型不符时会抛出 ValidationError
@@ -124,4 +130,3 @@ async def judge_chunk_with_qwen(
         # LLM 调用失败（超时、格式错误等），降级为启发式规则，记录警告日志
         logger.warning("Qwen judge fallback triggered: %s", exc)
         return _heuristic_fallback(features, genre)
-

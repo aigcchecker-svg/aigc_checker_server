@@ -78,8 +78,12 @@ async def generate_json(system_prompt: str, user_prompt: str, schema: dict, mode
         "system": system_prompt,
         "prompt": user_prompt,
         "stream": False,
+        "keep_alive": "10m",
         "format": schema,  # 通过 format 字段强制 Ollama 按 Schema 输出 JSON
-        "options": {"temperature": 0.1},
+        "options": {
+            "temperature": 0.0,
+            "num_predict": 96,
+        },
     }
     logger.info("Calling Ollama JSON model=%s", actual_model)
     try:

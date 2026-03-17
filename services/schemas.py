@@ -16,7 +16,6 @@ class QwenJudgeResult(BaseModel):
     ai_score: float = Field(..., ge=0, le=100)
     confidence: float = Field(..., ge=0, le=1)
     signals: QwenSignals
-    reasons: list[str] = Field(default_factory=list)
     label: Literal["human", "mixed", "ai"]
 
 
@@ -46,4 +45,3 @@ class RemoteReviewResult(BaseModel):
     ai_score: float = Field(..., ge=0, le=100)
     confidence: float = Field(..., ge=0, le=1)
     label: Literal["human", "mixed", "ai"]
-    reasons: list[str] = Field(default_factory=list)

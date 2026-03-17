@@ -221,17 +221,14 @@ def _build_reduce_prompt(content: str, detection_result: dict) -> str:
     """构建降 AI 改写的用户 Prompt，携带检测结果摘要和高风险分块信息。
 
     只传入前 5 个高风险分块，避免 Prompt 过长导致超出模型上下文。
-    每个分块的 reasons 仅取前 3 条，保持 Prompt 简洁。
     """
     high_risk_chunks = detection_result.get("analysis", {}).get("high_risk_chunks", [])
-    summary_reasons = detection_result.get("analysis", {}).get("summary_reasons", [])
     # 只筛选高风险分块，并限制数量为 5，降低 Prompt token 用量
     chunk_payload = [
         {
             "chunk_id": chunk["chunk_id"],
             "ai_score": chunk["ai_score"],
             "label": chunk["label"],
-            "reasons": chunk["reasons"][:3],
             "text": chunk["text"],
         }
         for chunk in detection_result.get("chunks", [])
@@ -240,7 +237,6 @@ def _build_reduce_prompt(content: str, detection_result: dict) -> str:
     return (
         f"原文 AI 概率: {detection_result.get('ai_probability')}\n"
         f"文体: {detection_result.get('analysis', {}).get('genre')}\n"
-        f"摘要原因: {json.dumps(summary_reasons, ensure_ascii=False)}\n"
         f"优先改写分块: {json.dumps(chunk_payload, ensure_ascii=False)}\n\n"
         f"原始文本:\n{content}"
     )
@@ -253,14 +249,13 @@ def _build_remote_review_prompt(content: str, detection_result: dict) -> str:
     """
     analysis = detection_result.get("analysis", {})
     doc_features = detection_result.get("document_features", {})
-    # 只取前 4 个分块，避免 Prompt 过长；每块 reasons 限 3 条
+    # 只取前 4 个分块，避免 Prompt 过长
     candidate_chunks = [
         {
             "chunk_id": chunk["chunk_id"],
             "ai_score": chunk["ai_score"],
             "label": chunk["label"],
             "confidence": chunk["confidence"],
-            "reasons": chunk["reasons"][:3],
             "text": chunk["text"],
         }
         for chunk in detection_result.get("chunks", [])[:4]
@@ -269,7 +264,6 @@ def _build_remote_review_prompt(content: str, detection_result: dict) -> str:
         "genre": analysis.get("genre"),
         "document_ai_probability": detection_result.get("ai_probability"),
         "document_confidence": detection_result.get("confidence"),
-        "summary_reasons": analysis.get("summary_reasons", []),
         "document_features": {
             "char_count": doc_features.get("char_count"),
             "sentence_count": doc_features.get("sentence_count"),
@@ -315,15 +309,6 @@ def _should_trigger_remote_review(result: dict, plan: str, can_remote_review: bo
         # 正式文体天然偏结构化，容易误判；高风险块少说明整体尚可，需保守复核
         return True, "conservative_genre"
     return False, "not_needed"
-
-
-def _map_review_label(label: str) -> str:
-    """将二审返回的内部标签（ai/mixed/human）转换为用户可读的英文标签。"""
-    if label == "ai":
-        return "AI Generated"
-    if label == "mixed":
-        return "Mixed"
-    return "Human Written"
 
 
 def _map_score_label(score: float) -> str:
@@ -376,10 +361,6 @@ def _merge_review_result(result: dict, review_result: dict, review_meta: dict) -
         result["confidence"] = "high"
     elif review_conf >= 0.45 and result["confidence"] == "low":
         result["confidence"] = "medium"
-    # 二审原因优先排在前面，去重后最多保留 5 条
-    result["analysis"]["summary_reasons"] = list(
-        dict.fromkeys(review_result.get("reasons", []) + result["analysis"].get("summary_reasons", []))
-    )[:5]
     result["review"] = {
         **review_meta,
         "used": True,

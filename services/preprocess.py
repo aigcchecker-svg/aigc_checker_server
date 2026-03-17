@@ -134,7 +134,7 @@ def split_sentences(text: str) -> list[str]:
     return [item["text"] for item in _split_sentences_with_spans(clean_text(text))]
 
 
-def chunk_text(text: str, target_size: int = 220, min_size: int = 120) -> list[dict]:
+def chunk_text(text: str, target_size: int = 320, min_size: int = 180) -> list[dict]:
     """将文本切分为用于逐块评分的分块列表。
 
     策略：累积句子直到字符数接近 target_size 时输出一块（flush）；
@@ -271,4 +271,3 @@ def detect_genre(text: str) -> str:
         return "translation_like"
 
     return "general"
-
