@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import logging
 import json
 
@@ -9,6 +10,10 @@ from services.schemas import QwenJudgeResult
 
 
 logger = logging.getLogger(__name__)
+
+LOCAL_JUDGE_SKIP_SHORT_CHARS = int(os.getenv("LOCAL_JUDGE_SKIP_SHORT_CHARS", "170"))
+LOCAL_JUDGE_SKIP_LIST_RATIO = float(os.getenv("LOCAL_JUDGE_SKIP_LIST_RATIO", "0.55"))
+LOCAL_JUDGE_SKIP_DETAIL_COUNT = int(os.getenv("LOCAL_JUDGE_SKIP_DETAIL_COUNT", "5"))
 
 _QWEN_JUDGE_SCHEMA = {
     "type": "object",
@@ -83,7 +88,25 @@ def _heuristic_fallback(features: dict, genre: str) -> dict:
             "human_detail": round(human_detail, 4),
         },
         "label": label,
+        "judge_mode": "heuristic_fallback",
     }
+
+
+def _should_skip_qwen(features: dict, genre: str) -> tuple[bool, str]:
+    """对低信息量或结构化强的分块直接走启发式，减少本地模型调用。"""
+    char_count = int(features.get("char_count", 0) or 0)
+    sentence_count = int(features.get("sentence_count", 0) or 0)
+    list_ratio = float(features.get("list_line_ratio", 0.0) or 0.0)
+    detail_count = int(features.get("detail_signal_count", 0) or 0)
+    repeated = float(features.get("repeated_ngram_ratio", 0.0) or 0.0)
+
+    if char_count <= LOCAL_JUDGE_SKIP_SHORT_CHARS or sentence_count <= 1:
+        return True, "short_or_single_sentence"
+    if genre == "list_or_table" or list_ratio >= LOCAL_JUDGE_SKIP_LIST_RATIO:
+        return True, "structured_chunk"
+    if genre in {"business_doc", "academic"} and detail_count >= LOCAL_JUDGE_SKIP_DETAIL_COUNT and repeated < 0.035:
+        return True, "detail_heavy_formal"
+    return False, ""
 
 
 async def judge_chunk_with_qwen(
@@ -116,6 +139,13 @@ async def judge_chunk_with_qwen(
         "只输出 JSON，不要解释，不要 reasons，不要 markdown。"
     )
 
+    should_skip, skip_reason = _should_skip_qwen(features, genre)
+    if should_skip:
+        heuristic = _heuristic_fallback(features, genre)
+        heuristic["judge_mode"] = "heuristic_skip"
+        heuristic["judge_skip_reason"] = skip_reason
+        return heuristic
+
     try:
         data = await generate_json(
             system_prompt=QWEN_CHUNK_SYSTEM_PROMPT,
@@ -125,7 +155,9 @@ async def judge_chunk_with_qwen(
         )
         # 用 Pydantic 校验模型返回格式，字段缺失或类型不符时会抛出 ValidationError
         validated = QwenJudgeResult.model_validate(data)
-        return validated.model_dump()
+        result = validated.model_dump()
+        result["judge_mode"] = "qwen"
+        return result
     except Exception as exc:
         # LLM 调用失败（超时、格式错误等），降级为启发式规则，记录警告日志
         logger.warning("Qwen judge fallback triggered: %s", exc)

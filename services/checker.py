@@ -490,6 +490,8 @@ async def run_check(
                 "features": features,
                 "signals": qwen_result.get("signals", {}),
                 "judge_label": qwen_result.get("label"),
+                "judge_mode": qwen_result.get("judge_mode", "qwen"),
+                "judge_skip_reason": qwen_result.get("judge_skip_reason"),
             }
         )
 

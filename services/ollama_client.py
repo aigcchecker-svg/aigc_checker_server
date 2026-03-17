@@ -19,6 +19,8 @@ logger = logging.getLogger(__name__)
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://218.4.33.190:26316")
 OLLAMA_DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", "qwen3.5:9b")
 OLLAMA_TIMEOUT = float(os.getenv("OLLAMA_TIMEOUT", "120"))
+OLLAMA_JSON_NUM_CTX = int(os.getenv("OLLAMA_JSON_NUM_CTX", "1536"))
+OLLAMA_JSON_NUM_PREDICT = int(os.getenv("OLLAMA_JSON_NUM_PREDICT", "96"))
 
 
 def _extract_json(text: str) -> dict[str, Any]:
@@ -82,7 +84,8 @@ async def generate_json(system_prompt: str, user_prompt: str, schema: dict, mode
         "format": schema,  # 通过 format 字段强制 Ollama 按 Schema 输出 JSON
         "options": {
             "temperature": 0.0,
-            "num_predict": 96,
+            "num_ctx": OLLAMA_JSON_NUM_CTX,
+            "num_predict": OLLAMA_JSON_NUM_PREDICT,
         },
     }
     logger.info("Calling Ollama JSON model=%s", actual_model)
