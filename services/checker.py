@@ -473,6 +473,15 @@ async def run_check(
     genre = detect_genre(cleaned)
     doc_features = extract_document_features(cleaned)
     chunks = chunk_text(cleaned)
+    logger.info(
+        "run_check params: api_source=%s requested_model=%s effective_local_model=%s plan=%s chars=%d chunks=%d",
+        api_source or API_SOURCE,
+        model,
+        model or OLLAMA_DEFAULT_MODEL,
+        plan,
+        len(cleaned),
+        len(chunks),
+    )
     logger.info("Running check: genre=%s, model=%s, chunks=%d", genre, model or OLLAMA_DEFAULT_MODEL, len(chunks))
 
     # Step 2: 逐分块提取特征 + LLM 打分 + 规则综合评分

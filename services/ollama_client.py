@@ -88,7 +88,14 @@ async def generate_json(system_prompt: str, user_prompt: str, schema: dict, mode
             "num_predict": OLLAMA_JSON_NUM_PREDICT,
         },
     }
-    logger.info("Calling Ollama JSON model=%s", actual_model)
+    logger.info(
+        "Calling Ollama JSON: base_url=%s model=%s prompt_len=%d schema_keys=%s options=%s",
+        OLLAMA_BASE_URL,
+        actual_model,
+        len(user_prompt),
+        list(schema.get("properties", {}).keys()) if isinstance(schema, dict) else None,
+        payload.get("options"),
+    )
     try:
         raw = await _post_generate(payload)
         return _extract_json(raw)
