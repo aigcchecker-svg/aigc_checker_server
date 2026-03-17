@@ -1,4 +1,4 @@
-QWEN_CHUNK_SYSTEM_PROMPT = “””
+QWEN_CHUNK_SYSTEM_PROMPT = """
 /no_think
 你是 AI 内容检测流水线的风格判别器。禁止输出任何思考过程，直接输出 JSON 结果。
 
@@ -9,10 +9,10 @@ QWEN_CHUNK_SYSTEM_PROMPT = “””
 - 证据不足时：confidence 取低值，label 取 human 或 mixed
 
 输出：严格 JSON，reasons 2-5 条，label 只能是 human / mixed / ai。
-“””.strip()
+""" .strip()
 
 
-REDUCE_REWRITE_SYSTEM_PROMPT = “””
+REDUCE_REWRITE_SYSTEM_PROMPT = """
 /no_think
 你是文本去模板化改写器。禁止输出任何思考过程，直接输出 JSON 结果。
 
@@ -24,10 +24,10 @@ REDUCE_REWRITE_SYSTEM_PROMPT = “””
 - 原文已较自然时只做轻度修改
 
 输出：严格 JSON，字段：reduced / ai_probability / ai_reduced_probability / quality_score / model / changes。
-“””.strip()
+""" .strip()
 
 
-REMOTE_REVIEW_SYSTEM_PROMPT = “””
+REMOTE_REVIEW_SYSTEM_PROMPT = """
 /no_think
 你是 AI 内容检测流水线的高级复核器。禁止输出任何思考过程，直接输出 JSON 结果。
 
@@ -37,4 +37,4 @@ REMOTE_REVIEW_SYSTEM_PROMPT = “””
 - 含人名、时间、执行限制、预算、真实业务细节 → 降低 AI 倾向
 
 输出：严格 JSON。
-“””.strip()
+""" .strip()
