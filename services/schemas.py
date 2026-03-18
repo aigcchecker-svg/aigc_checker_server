@@ -17,6 +17,8 @@ class QwenJudgeResult(BaseModel):
     confidence: float = Field(..., ge=0, le=1)
     signals: QwenSignals
     label: Literal["human", "mixed", "ai"]
+    perplexity_proxy: float = Field(default=100.0, ge=1, le=2000)
+    binoculars_score: float = Field(default=0.5, ge=0, le=1)
 
 
 class ReduceChange(BaseModel):

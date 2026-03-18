@@ -202,10 +202,18 @@ def aggregate_document(chunks: list[dict], genre: str, doc_features: dict) -> di
     # 高风险分块：ai_score >= 65 的分块 ID 列表，用于指导改写优先级
     high_risk_chunks = [chunk["chunk_id"] for chunk in chunks if chunk.get("ai_score", 0) >= 65]
 
+    # 从各分块聚合 perplexity_proxy 和 binoculars_score（按字符数加权平均）
+    ppl_values = [(c.get("perplexity_proxy"), max(len(c.get("text", "")), 1)) for c in chunks if c.get("perplexity_proxy") is not None]
+    bino_values = [(c.get("binoculars_score"), max(len(c.get("text", "")), 1)) for c in chunks if c.get("binoculars_score") is not None]
+    total_ppl_w = sum(w for _, w in ppl_values) or 1
+    total_bino_w = sum(w for _, w in bino_values) or 1
+    agg_perplexity = round(sum(v * w for v, w in ppl_values) / total_ppl_w, 2) if ppl_values else doc_features.get("pseudo_perplexity")
+    agg_binoculars = round(sum(v * w for v, w in bino_values) / total_bino_w, 4) if bino_values else None
+
     metrics = {
-        "perplexity": doc_features.get("pseudo_perplexity"),
+        "perplexity": agg_perplexity,
         "burstiness": doc_features.get("burstiness"),
-        "binoculars": None,  # 预留字段，后续可接 Binoculars 检测器
+        "binoculars": agg_binoculars,
     }
 
     # 将每个分块映射为句子级结果，level 为 1-10 的可视化热力级别

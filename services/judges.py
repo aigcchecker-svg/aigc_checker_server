@@ -32,8 +32,10 @@ _QWEN_JUDGE_SCHEMA = {
             "additionalProperties": False,
         },
         "label": {"type": "string", "enum": ["human", "mixed", "ai"]},
+        "perplexity_proxy": {"type": "number", "minimum": 1, "maximum": 2000},
+        "binoculars_score": {"type": "number", "minimum": 0, "maximum": 1},
     },
-    "required": ["ai_score", "confidence", "signals", "label"],
+    "required": ["ai_score", "confidence", "signals", "label", "perplexity_proxy", "binoculars_score"],
     "additionalProperties": False,
 }
 
@@ -78,6 +80,13 @@ def _heuristic_fallback(features: dict, genre: str) -> dict:
 
     score = _clamp(score, 0, 100)
     label = "ai" if score >= 70 else "mixed" if score >= 40 else "human"
+
+    # perplexity_proxy：AI文本可预测性强（低值），人类文本更意外（高值）
+    # 综合 burstiness（高→变化大→高困惑）、重复率（高→低困惑）、词汇多样性（高→高困惑）
+    ppl_proxy = _clamp(15 + burstiness * 200 + lexical * 80 - repeated * 150, 5, 500)
+    # binoculars_score：0=AI，1=人类；与 ai_score 反向相关，叠加细节信号修正
+    bino = _clamp(1 - score / 100 * 0.85 + human_detail * 0.1, 0.02, 0.98)
+
     return {
         "ai_score": round(score, 2),
         "confidence": 0.38,  # 启发式兜底固定低置信度，提示调用方结果仅供参考
@@ -88,6 +97,8 @@ def _heuristic_fallback(features: dict, genre: str) -> dict:
             "human_detail": round(human_detail, 4),
         },
         "label": label,
+        "perplexity_proxy": round(ppl_proxy, 2),
+        "binoculars_score": round(bino, 4),
         "judge_mode": "heuristic_fallback",
     }
 

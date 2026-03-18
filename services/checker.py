@@ -501,6 +501,8 @@ async def run_check(
                 "judge_label": qwen_result.get("label"),
                 "judge_mode": qwen_result.get("judge_mode", "qwen"),
                 "judge_skip_reason": qwen_result.get("judge_skip_reason"),
+                "perplexity_proxy": qwen_result.get("perplexity_proxy"),
+                "binoculars_score": qwen_result.get("binoculars_score"),
             }
         )
 

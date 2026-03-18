@@ -8,6 +8,10 @@ QWEN_CHUNK_SYSTEM_PROMPT = """
 - 仅凭文本正式或结构工整，不得判定为 AI
 - 证据不足时：confidence 取低值，label 取 human 或 mixed
 
+额外字段说明：
+- perplexity_proxy：语言模型困惑度代理。AI生成文本≈5-50（高度可预测），人类写作≈100-500（更意外），极自然口语可达1000+
+- binoculars_score：双筒镜检测代理（指令模型与基础模型预测比值的近似）。0.0=AI高度可预测，1.0=人类自然度高
+
 输出要求：
 - 只输出 JSON
 - 不要输出 reasons
