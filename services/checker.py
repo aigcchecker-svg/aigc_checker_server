@@ -218,26 +218,46 @@ def _remote_review_schema() -> dict:
 
 
 def _build_reduce_prompt(content: str, detection_result: dict) -> str:
-    """构建降 AI 改写的用户 Prompt，携带检测结果摘要和高风险分块信息。
+    """构建降 AI 改写的用户 Prompt，携带检测结果摘要、统计特征目标和分块信息。
 
-    只传入前 5 个高风险分块，避免 Prompt 过长导致超出模型上下文。
+    改写范围扩展至 score>=40 的中高风险块（最多 8 个，按风险降序），
+    同时传入具体的统计特征偏差，让模型知道需要改变哪些可测量指标。
     """
-    high_risk_chunks = detection_result.get("analysis", {}).get("high_risk_chunks", [])
-    # 只筛选高风险分块，并限制数量为 5，降低 Prompt token 用量
+    doc_features = detection_result.get("document_features", {})
+
+    # 按 ai_score 降序，纳入所有 score>=40 的中高风险块，最多 8 个
+    risk_chunks = sorted(
+        [c for c in detection_result.get("chunks", []) if c.get("ai_score", 0) >= 40],
+        key=lambda c: c.get("ai_score", 0),
+        reverse=True,
+    )[:8]
     chunk_payload = [
-        {
-            "chunk_id": chunk["chunk_id"],
-            "ai_score": chunk["ai_score"],
-            "label": chunk["label"],
-            "text": chunk["text"],
-        }
-        for chunk in detection_result.get("chunks", [])
-        if chunk["chunk_id"] in high_risk_chunks[:5]
+        {"chunk_id": c["chunk_id"], "ai_score": c["ai_score"], "label": c["label"], "text": c["text"]}
+        for c in risk_chunks
     ]
+
+    # 根据统计特征生成具体改写目标，让模型有明确的可测量目标
+    feature_targets = []
+    if doc_features.get("burstiness", 1.0) < 0.3:
+        feature_targets.append("句长过于均匀（burstiness 低），需在段落中插入短句（≤10字）或超长句（≥40字）")
+    if (doc_features.get("sentence_length_std") or 0.0) < 8:
+        feature_targets.append("句长标准差过小，需主动制造长短句混搭，拉大标准差")
+    if doc_features.get("repeated_ngram_ratio", 0.0) > 0.05:
+        feature_targets.append("存在重复短语（n-gram 重复率高），需替换同义或近义表达")
+    if doc_features.get("lexical_diversity", 1.0) < 0.55:
+        feature_targets.append("词汇多样性不足，需丰富用词，减少同一词汇反复出现")
+    if doc_features.get("connector_density", 0.0) > 0.07:
+        feature_targets.append("连接词过密（因此/然而/总之/首先/其次），需删减 50% 以上")
+    if not feature_targets:
+        feature_targets.append("整体指标尚可，做轻度去模板化处理即可")
+
+    targets_str = "\n".join(f"- {t}" for t in feature_targets)
     return (
         f"原文 AI 概率: {detection_result.get('ai_probability')}\n"
         f"文体: {detection_result.get('analysis', {}).get('genre')}\n"
-        f"优先改写分块: {json.dumps(chunk_payload, ensure_ascii=False)}\n\n"
+        f"统计特征改写目标:\n{targets_str}\n"
+        f"需改写分块（score≥40，按风险降序，共 {len(chunk_payload)} 个）: "
+        f"{json.dumps(chunk_payload, ensure_ascii=False)}\n\n"
         f"原始文本:\n{content}"
     )
 
@@ -423,20 +443,36 @@ def _quality_score(original: str, rewritten: str, before: float, after: float) -
 async def _rewrite_content(content: str, detection_result: dict, model: str | None, api_source: str | None) -> dict:
     """调用 LLM 对原文进行降 AI 改写，返回 ReduceRewriteResult dict。
 
-    Azure/OpenRouter 使用通用 JSON 调用；Ollama 使用结构化 Schema 约束输出格式。
+    改写后端选择策略（检测与改写解耦）：
+    - 若请求方显式指定了 azure/openrouter，则直接使用指定来源
+    - 若检测走 Ollama（默认），改写优先路由到 OpenRouter（不同模型风格，更难被 Qwen 检测识别）
+    - OpenRouter 不可用时才回退到本地 Ollama
     改写失败时返回原文作为 fallback，quality_score 给低分提示异常。
     """
-    source = (api_source or API_SOURCE).lower()
+    detection_source = (api_source or API_SOURCE).lower()
     prompt = _build_reduce_prompt(content, detection_result)
     schema = _rewrite_schema()
 
+    # 确定改写来源：显式指定远端时直接用，否则本地检测场景优先走 OpenRouter 解耦
+    if detection_source in {"azure", "openrouter"}:
+        rewrite_source = detection_source
+        rewrite_model = model
+    elif _get_openrouter_client() is not None:
+        # 检测用 Ollama，改写用 OpenRouter：不同模型风格令 Qwen 检测器难以识别
+        rewrite_source = "openrouter"
+        rewrite_model = model or OPENROUTER_DEFAULT_MODEL
+        logger.info("Rewrite routed to OpenRouter (%s) to decouple from Ollama detector", rewrite_model)
+    else:
+        rewrite_source = "ollama"
+        rewrite_model = model
+
     try:
-        if source in {"azure", "openrouter"}:
+        if rewrite_source in {"azure", "openrouter"}:
             # 远端模型支持 json_object 格式，不需要显式传 schema
-            raw = await _call_remote_json(REDUCE_REWRITE_SYSTEM_PROMPT, prompt, model=model, api_source=source)
+            raw = await _call_remote_json(REDUCE_REWRITE_SYSTEM_PROMPT, prompt, model=rewrite_model, api_source=rewrite_source)
         else:
             # Ollama 通过 format 字段传入 JSON Schema 约束输出结构
-            raw = await generate_json(REDUCE_REWRITE_SYSTEM_PROMPT, prompt, schema=schema, model=model or OLLAMA_DEFAULT_MODEL)
+            raw = await generate_json(REDUCE_REWRITE_SYSTEM_PROMPT, prompt, schema=schema, model=rewrite_model or OLLAMA_DEFAULT_MODEL)
         return ReduceRewriteResult.model_validate(raw).model_dump()
     except Exception as exc:
         logger.warning("Rewrite failed, falling back to original text: %s", exc)
