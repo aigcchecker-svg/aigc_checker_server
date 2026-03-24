@@ -29,6 +29,7 @@ class ReduceChange(BaseModel):
 
 class ReduceRewriteResult(BaseModel):
     reduced: str
+    rewrite: bool = True
     ai_probability: str = "0.00"
     ai_reduced_probability: str = "0.00"
     quality_score: float = Field(default=0, ge=0, le=100)

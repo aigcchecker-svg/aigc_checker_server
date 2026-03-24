@@ -447,7 +447,7 @@ async def _rewrite_content(content: str, detection_result: dict, model: str | No
     - 若请求方显式指定了 azure/openrouter，则直接使用指定来源
     - 若检测走 Ollama（默认），改写优先路由到 OpenRouter（不同模型风格，更难被 Qwen 检测识别）
     - OpenRouter 不可用时才回退到本地 Ollama
-    改写失败时返回原文作为 fallback，quality_score 给低分提示异常。
+    改写失败时返回原文作为 fallback，并通过 rewrite=False 标记未成功改写。
     """
     detection_source = (api_source or API_SOURCE).lower()
     prompt = _build_reduce_prompt(content, detection_result)
@@ -476,9 +476,10 @@ async def _rewrite_content(content: str, detection_result: dict, model: str | No
         return ReduceRewriteResult.model_validate(raw).model_dump()
     except Exception as exc:
         logger.warning("Rewrite failed, falling back to original text: %s", exc)
-        # 降级返回原文，quality_score 给 55 表示"未改写"状态
+        # 降级返回原文，并显式标记本次改写失败
         return ReduceRewriteResult(
             reduced=content,
+            rewrite=False,
             quality_score=55.0,
             model="light",
             changes=[],
@@ -590,7 +591,7 @@ async def run_reduce(
     4. _quality_score 综合内容保留度和降 AI 幅度计算质量分
 
     Returns:
-        包含 reduced（改写文本）、ai_probability（原始概率）、
+        包含 reduced（改写文本）、rewrite（是否成功改写）、ai_probability（原始概率）、
         ai_reduced_probability（改写后概率）、quality_score 的 dict
     """
     # Step 1: 检测原文，获取 AI 概率和高风险分块
@@ -616,10 +617,12 @@ async def run_reduce(
     # Step 4: 计算改写前后概率差异和质量综合得分
     before = float(original_result["ai_probability"])
     after = float(reduced_result["ai_probability"])
-    quality = _quality_score(content, reduced_text, before, after)
+    rewrite_succeeded = bool(rewrite_result.get("rewrite", True))
+    quality = rewrite_result.get("quality_score", 55.0) if not rewrite_succeeded else _quality_score(content, reduced_text, before, after)
 
     return {
         "reduced": reduced_text,
+        "rewrite": rewrite_succeeded,
         "ai_probability": f"{before:.2f}",
         "ai_reduced_probability": f"{after:.2f}",
         "quality_score": quality,

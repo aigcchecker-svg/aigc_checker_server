@@ -40,7 +40,7 @@ REDUCE_REWRITE_SYSTEM_PROMPT = """
 3. 精简连接词：删减超过50%的"因此""然而""总之""此外""同时"等程式化过渡词，用自然语气替代
 4. 替换空话：将"有效""充分""积极""高质量""全面"等泛化修饰词替换为具体描述或数字
 
-输出：严格 JSON，字段：reduced / ai_probability / ai_reduced_probability / quality_score / model / changes。
+输出：严格 JSON，字段：reduced / rewrite / ai_probability / ai_reduced_probability / quality_score / model / changes。
 """ .strip()
 
 
