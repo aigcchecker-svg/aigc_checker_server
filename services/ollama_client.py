@@ -21,6 +21,7 @@ OLLAMA_DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", "qwen3.5:9b")
 OLLAMA_TIMEOUT = float(os.getenv("OLLAMA_TIMEOUT", "120"))
 OLLAMA_JSON_NUM_CTX = int(os.getenv("OLLAMA_JSON_NUM_CTX", "1536"))
 OLLAMA_JSON_NUM_PREDICT = int(os.getenv("OLLAMA_JSON_NUM_PREDICT", "96"))
+OLLAMA_DISABLE_THINKING = os.getenv("OLLAMA_DISABLE_THINKING", "true").lower() not in {"false", "0", "no"}
 
 
 def _extract_json(text: str) -> dict[str, Any]:
@@ -52,12 +53,15 @@ def _extract_generate_text(data: dict[str, Any]) -> str:
 
 def _summarize_empty_response(data: dict[str, Any]) -> str:
     """生成空响应的诊断摘要，便于定位 Ollama 兼容性问题。"""
+    nested_message = data.get("message") if isinstance(data.get("message"), dict) else {}
     return (
         f"keys={sorted(data.keys())} "
         f"done={data.get('done')} "
         f"done_reason={data.get('done_reason')} "
         f"response_len={len(str(data.get('response') or ''))} "
-        f"thinking_len={len(str(data.get('thinking') or ''))}"
+        f"thinking_len={len(str(data.get('thinking') or ''))} "
+        f"message_thinking_len={len(str(nested_message.get('thinking') or ''))} "
+        f"think_disabled={OLLAMA_DISABLE_THINKING}"
     )
 
 
@@ -123,16 +127,18 @@ async def generate_json(
         "system": system_prompt,
         "prompt": user_prompt,
         "stream": False,
+        "think": not OLLAMA_DISABLE_THINKING,
         "keep_alive": "10m",
         "format": schema,  # 通过 format 字段强制 Ollama 按 Schema 输出 JSON
         "options": merged_options,
     }
     logger.info(
-        "Calling Ollama JSON: base_url=%s model=%s prompt_len=%d schema_keys=%s options=%s",
+        "Calling Ollama JSON: base_url=%s model=%s prompt_len=%d schema_keys=%s think=%s options=%s",
         OLLAMA_BASE_URL,
         actual_model,
         len(user_prompt),
         list(schema.get("properties", {}).keys()) if isinstance(schema, dict) else None,
+        payload.get("think"),
         payload.get("options"),
     )
     try:
@@ -163,9 +169,10 @@ async def generate_text(system_prompt: str, user_prompt: str, model: str | None 
         "system": system_prompt,
         "prompt": user_prompt,
         "stream": False,
+        "think": not OLLAMA_DISABLE_THINKING,
         "options": {"temperature": 0.3},
     }
-    logger.info("Calling Ollama text model=%s", actual_model)
+    logger.info("Calling Ollama text model=%s think=%s", actual_model, payload.get("think"))
     try:
         return await _post_generate(payload)
     except Exception as exc:
