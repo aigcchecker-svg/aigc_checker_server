@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import urllib.request
+import uuid
 from typing import Optional
 
 try:
@@ -54,6 +55,20 @@ _openrouter_client = None
 def _clamp(value: float, low: float, high: float) -> float:
     """将 value 限定在 [low, high] 区间内。"""
     return max(low, min(high, value))
+
+
+def new_task_id(prefix: str) -> str:
+    """生成简短任务 ID，便于串联 API 请求全链路日志。"""
+    return f"{prefix}-{uuid.uuid4().hex[:8]}"
+
+
+def _log_task(task_id: str | None, step: str, **fields) -> None:
+    """统一输出结构化任务日志。"""
+    payload = " ".join(f"{key}={value}" for key, value in fields.items())
+    if payload:
+        logger.info("task=%s step=%s %s", task_id or "-", step, payload)
+    else:
+        logger.info("task=%s step=%s", task_id or "-", step)
 
 
 def _normalize_api_source(source: str | None) -> str:
@@ -261,7 +276,7 @@ def _normalize_rewrite_result(raw: dict, original_content: str) -> dict:
     }
 
 
-async def _call_azure_json(system_prompt: str, user_prompt: str, deployment_name: str, purpose: str) -> dict:
+async def _call_azure_json(system_prompt: str, user_prompt: str, deployment_name: str, purpose: str, task_id: str | None = None) -> dict:
     """调用 Azure OpenAI Chat Completions JSON 模式。
 
     Azure `model` 参数应传 deployment name，而不是公共模型 ID。
@@ -273,7 +288,7 @@ async def _call_azure_json(system_prompt: str, user_prompt: str, deployment_name
     client = _get_azure_client()
     if not client:
         raise RuntimeError("Azure 未配置")
-    logger.info("Calling Azure deployment=%s purpose=%s", deployment_name, purpose)
+    _log_task(task_id, "provider.azure.call", purpose=purpose, deployment=deployment_name)
     response = await client.chat.completions.create(
         model=deployment_name,
         messages=messages,
@@ -283,7 +298,7 @@ async def _call_azure_json(system_prompt: str, user_prompt: str, deployment_name
     return _extract_json(response.choices[0].message.content)
 
 
-async def _call_openrouter_json(system_prompt: str, user_prompt: str, model_id: str, purpose: str) -> dict:
+async def _call_openrouter_json(system_prompt: str, user_prompt: str, model_id: str, purpose: str, task_id: str | None = None) -> dict:
     """调用 OpenRouter Chat Completions JSON 模式。
 
     OpenRouter `model` 参数应传公开 model ID，例如 `qwen/qwen-plus`。
@@ -294,7 +309,7 @@ async def _call_openrouter_json(system_prompt: str, user_prompt: str, model_id: 
     ]
     send_mode = os.getenv("OPENROUTER_SEND_MODE", "self").lower()
     if send_mode == "proxy":
-        logger.info("Calling OpenRouter proxy model=%s purpose=%s", model_id, purpose)
+        _log_task(task_id, "provider.openrouter.proxy_call", purpose=purpose, model=model_id)
         return _extract_json(await _send_by_proxy(messages, model_id))
 
     client = _get_openrouter_client()
@@ -314,7 +329,7 @@ async def _call_openrouter_json(system_prompt: str, user_prompt: str, model_id: 
     if OPENROUTER_EXCLUDE_REASONING:
         request_kwargs["extra_body"] = {"reasoning": {"exclude": True}}
 
-    logger.info("Calling OpenRouter self model=%s purpose=%s", model_id, purpose)
+    _log_task(task_id, "provider.openrouter.call", purpose=purpose, model=model_id)
     response = await client.chat.completions.create(**request_kwargs)
     return _extract_json(response.choices[0].message.content)
 
@@ -491,10 +506,10 @@ def _merge_review_result(result: dict, review_result: dict, review_meta: dict) -
     return result
 
 
-async def _run_remote_review(content: str, result: dict) -> dict | None:
+async def _run_remote_review(content: str, result: dict, task_id: str | None = None) -> dict | None:
     """调用远端 LLM 进行二审，返回验证后的 RemoteReviewResult dict，失败时返回 None 不影响主流程。"""
     if PRO_REVIEW_SOURCE not in {"azure", "openrouter"}:
-        logger.info("Remote review skipped: unsupported source=%s", PRO_REVIEW_SOURCE)
+        _log_task(task_id, "review.skip", reason="unsupported_source", source=PRO_REVIEW_SOURCE)
         return None
 
     try:
@@ -505,6 +520,7 @@ async def _run_remote_review(content: str, result: dict) -> dict | None:
                 review_prompt,
                 deployment_name=_review_model_for(PRO_REVIEW_SOURCE),
                 purpose="remote_review",
+                task_id=task_id,
             )
         else:
             raw = await _call_openrouter_json(
@@ -512,10 +528,11 @@ async def _run_remote_review(content: str, result: dict) -> dict | None:
                 review_prompt,
                 model_id=_review_model_for(PRO_REVIEW_SOURCE),
                 purpose="remote_review",
+                task_id=task_id,
             )
         return RemoteReviewResult.model_validate(raw).model_dump()
     except Exception as exc:
-        logger.warning("Remote review skipped due to error: %s", exc)
+        _log_task(task_id, "review.skip", reason="provider_error", source=PRO_REVIEW_SOURCE, error=exc)
         return None
 
 
@@ -551,7 +568,7 @@ def _quality_score(original: str, rewritten: str, before: float, after: float) -
     return round(_clamp(0.6 * preservation + 0.4 * improvement, 0, 100), 2)
 
 
-async def _rewrite_content(content: str, detection_result: dict, model: str | None, api_source: str | None) -> dict:
+async def _rewrite_content(content: str, detection_result: dict, model: str | None, api_source: str | None, task_id: str | None = None) -> dict:
     """调用 LLM 对原文进行降 AI 改写，返回 ReduceRewriteResult dict。
 
     当前固定策略：
@@ -564,12 +581,13 @@ async def _rewrite_content(content: str, detection_result: dict, model: str | No
     prompt = _build_reduce_prompt(content, detection_result)
     for rewrite_provider, provider_model in _rewrite_attempts():
         try:
-            logger.info(
-                "Rewrite attempt provider=%s target_model=%s requested_api_source=%s requested_model=%s",
-                rewrite_provider,
-                provider_model,
-                requested_api_source,
-                model or "default",
+            _log_task(
+                task_id,
+                "rewrite.attempt",
+                provider=rewrite_provider,
+                target_model=provider_model,
+                requested_api_source=requested_api_source,
+                requested_model=model or "default",
             )
             if rewrite_provider == "azure":
                 raw = await _call_azure_json(
@@ -577,6 +595,7 @@ async def _rewrite_content(content: str, detection_result: dict, model: str | No
                     prompt,
                     deployment_name=provider_model,
                     purpose="rewrite",
+                    task_id=task_id,
                 )
             else:
                 raw = await _call_openrouter_json(
@@ -584,18 +603,15 @@ async def _rewrite_content(content: str, detection_result: dict, model: str | No
                     prompt,
                     model_id=provider_model,
                     purpose="rewrite_fallback",
+                    task_id=task_id,
                 )
             normalized = _normalize_rewrite_result(raw, content)
+            _log_task(task_id, "rewrite.success", provider=rewrite_provider, target_model=provider_model, rewrite=normalized.get("rewrite"))
             return ReduceRewriteResult.model_validate(normalized).model_dump()
         except Exception as exc:
-            logger.warning(
-                "Rewrite provider failed: provider=%s target_model=%s error=%s",
-                rewrite_provider,
-                provider_model,
-                exc,
-            )
+            _log_task(task_id, "rewrite.failure", provider=rewrite_provider, target_model=provider_model, error=exc)
 
-    logger.warning("Rewrite failed on all providers, falling back to original text")
+    _log_task(task_id, "rewrite.fallback", reason="all_providers_failed")
     return ReduceRewriteResult(
         reduced=content,
         rewrite=False,
@@ -611,6 +627,7 @@ async def run_check(
     api_source: Optional[str] = None,
     plan: str = "free",
     can_remote_review: bool = False,
+    task_id: str | None = None,
 ) -> dict:
     """主检测流程：清洗文本 → 检测文体 → 提取特征 → 分块打分 → 聚合结果 → 可选二审 → 按套餐裁剪。
 
@@ -632,26 +649,35 @@ async def run_check(
     genre = detect_genre(cleaned)
     doc_features = extract_document_features(cleaned, language=language)
     chunks = chunk_text(cleaned)
-    logger.info(
-        "run_check params: requested_api_source=%s requested_model=%s scan_source=%s scan_model=%s plan=%s language=%s chars=%d chunks=%d",
-        requested_api_source,
-        model,
-        SCAN_API_SOURCE,
-        effective_scan_model,
-        plan,
-        language,
-        len(cleaned),
-        len(chunks),
+    _log_task(
+        task_id,
+        "scan.start",
+        requested_api_source=requested_api_source,
+        requested_model=model or "default",
+        scan_source=SCAN_API_SOURCE,
+        scan_model=effective_scan_model,
+        plan=plan,
+        language=language,
+        chars=len(cleaned),
+        chunks=len(chunks),
     )
-    logger.info("Running check: genre=%s, scan_source=%s, model=%s, chunks=%d", genre, SCAN_API_SOURCE, effective_scan_model, len(chunks))
+    _log_task(task_id, "scan.genre", genre=genre)
 
     # Step 2: 逐分块提取特征 + LLM 打分 + 规则综合评分
     enriched_chunks: list[dict] = []
     for chunk in chunks:
         chunk_language = detect_language(chunk["text"]) if language == "mixed" else language
         features = extract_chunk_features(chunk["text"], language=chunk_language)
+        _log_task(task_id, "scan.chunk", chunk_id=chunk["chunk_id"], chunk_language=chunk_language, chars=len(chunk["text"]))
         # 调用 Qwen 本地模型对分块进行风格判断，失败时自动降级为启发式规则
-        qwen_result = await judge_chunk_with_qwen(chunk["text"], genre, features, model=effective_scan_model)
+        qwen_result = await judge_chunk_with_qwen(
+            chunk["text"],
+            genre,
+            features,
+            model=effective_scan_model,
+            task_id=task_id,
+            chunk_id=chunk["chunk_id"],
+        )
         # 融合 LLM 分数（55%）、统计特征分（30%）、风格信号分（15%）
         scored = score_chunk(features, qwen_result, genre)
         enriched_chunks.append(
@@ -690,12 +716,17 @@ async def run_check(
     result["review"] = review_meta
 
     if should_review:
-        review_result = await _run_remote_review(cleaned, result)
+        _log_task(task_id, "review.trigger", reason=review_reason, provider=PRO_REVIEW_SOURCE)
+        review_result = await _run_remote_review(cleaned, result, task_id=task_id)
         if review_result:
             # 将二审分数融合进最终结果
             result = _merge_review_result(result, review_result, review_meta)
+            _log_task(task_id, "review.merge", provider=PRO_REVIEW_SOURCE, model=_review_model_for(PRO_REVIEW_SOURCE))
+    else:
+        _log_task(task_id, "review.skip", reason=review_reason)
 
     # Step 5: 按套餐裁剪返回字段
+    _log_task(task_id, "scan.finish", ai_probability=result.get("ai_probability"), confidence=result.get("confidence"), label=result.get("label"))
     return _trim_result_by_plan(result, plan=plan)
 
 
@@ -705,6 +736,7 @@ async def run_reduce(
     api_source: Optional[str] = None,
     plan: str = "pro",
     can_remote_review: bool = False,
+    task_id: str | None = None,
 ) -> dict:
     """降 AI 改写主流程：先 Ollama 检测 → Azure 改写 → OpenRouter 兜底 → 再检测 → 计算质量分。
 
@@ -718,6 +750,7 @@ async def run_reduce(
         包含 reduced（改写文本）、rewrite（是否成功改写）、ai_probability（原始概率）、
         ai_reduced_probability（改写后概率）、quality_score 的 dict
     """
+    _log_task(task_id, "reduce.start", requested_api_source=_normalize_api_source(api_source), requested_model=model or "default", chars=len(content))
     # Step 1: 检测原文，获取 AI 概率和高风险分块
     original_result = await run_check(
         content=content,
@@ -725,17 +758,20 @@ async def run_reduce(
         api_source=api_source,
         plan=plan,
         can_remote_review=can_remote_review,
+        task_id=task_id,
     )
     # Step 2: 根据检测结果生成改写文本
-    rewrite_result = await _rewrite_content(content, original_result, model=model, api_source=api_source)
+    rewrite_result = await _rewrite_content(content, original_result, model=model, api_source=api_source, task_id=task_id)
     # Step 3: 清洗改写文本，回退到原文防止改写结果为空
     reduced_text = clean_text(rewrite_result.get("reduced") or content)
+    _log_task(task_id, "reduce.post_rewrite", rewrite=rewrite_result.get("rewrite"), reduced_chars=len(reduced_text))
     reduced_result = await run_check(
         content=reduced_text,
         model=model,
         api_source=api_source,
         plan=plan,
         can_remote_review=can_remote_review,
+        task_id=task_id,
     )
 
     # Step 4: 计算改写前后概率差异和质量综合得分
@@ -743,6 +779,7 @@ async def run_reduce(
     after = float(reduced_result["ai_probability"])
     rewrite_succeeded = bool(rewrite_result.get("rewrite", True))
     quality = rewrite_result.get("quality_score", 55.0) if not rewrite_succeeded else _quality_score(content, reduced_text, before, after)
+    _log_task(task_id, "reduce.finish", rewrite=rewrite_succeeded, before=f"{before:.2f}", after=f"{after:.2f}", quality=quality)
 
     return {
         "reduced": reduced_text,

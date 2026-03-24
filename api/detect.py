@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
-from services.checker import API_SOURCE, run_check, run_reduce
+from services.checker import API_SOURCE, new_task_id, run_check, run_reduce
 
 logger = logging.getLogger(__name__)
 
@@ -72,10 +72,11 @@ class ScanRequest(BaseModel):
     api_source: str = API_SOURCE
 
 
-def _log(tag: str, request: ScanRequest, text_len: int) -> None:
+def _log(tag: str, task_id: str, request: ScanRequest, text_len: int) -> None:
     """记录请求日志，包含操作标签、模型名、API 来源和文本长度，便于问题排查。"""
     logger.info(
-        "[%s] requested_model=%s requested_api_source=%s chars=%d",
+        "task=%s step=api.%s.accept requested_model=%s requested_api_source=%s chars=%d",
+        task_id,
         tag,
         request.model or "default",
         request.api_source,
@@ -100,20 +101,22 @@ async def scan_document(request: ScanRequest, auth_context: dict = Security(_ver
             status_code=400,
             detail=f"当前套餐最多支持 {auth_context['max_chars']} 个字符，当前文本过长。",
         )
+    task_id = new_task_id("scan")
     try:
-        _log("scan", request, len(text))
+        _log("scan", task_id, request, len(text))
         return await run_check(
             content=text,
             model=request.model,
             api_source=request.api_source,
             plan=auth_context["plan"],
             can_remote_review=auth_context["can_remote_review"],
+            task_id=task_id,
         )
     except ValueError as exc:
-        logger.warning("scan parse error: %s", exc)
+        logger.warning("task=%s step=api.scan.parse_error error=%s", task_id, exc)
         raise HTTPException(status_code=502, detail="底层引擎返回了无法解析的格式，请重试。")
     except Exception as exc:
-        logger.exception("scan failed: %s", exc)
+        logger.exception("task=%s step=api.scan.error error=%s", task_id, exc)
         raise HTTPException(status_code=500, detail=f"检测引擎服务异常: {str(exc)}")
 
 
@@ -135,18 +138,20 @@ async def reduce_document(request: ScanRequest, auth_context: dict = Security(_v
             status_code=400,
             detail=f"当前套餐最多支持 {auth_context['max_chars']} 个字符，当前文本过长。",
         )
+    task_id = new_task_id("reduce")
     try:
-        _log("reduce", request, len(text))
+        _log("reduce", task_id, request, len(text))
         return await run_reduce(
             content=text,
             model=request.model,
             api_source=request.api_source,
             plan=auth_context["plan"],
             can_remote_review=auth_context["can_remote_review"],
+            task_id=task_id,
         )
     except ValueError as exc:
-        logger.warning("reduce parse error: %s", exc)
+        logger.warning("task=%s step=api.reduce.parse_error error=%s", task_id, exc)
         raise HTTPException(status_code=502, detail="底层引擎返回了无法解析的格式，请重试。")
     except Exception as exc:
-        logger.exception("reduce failed: %s", exc)
+        logger.exception("task=%s step=api.reduce.error error=%s", task_id, exc)
         raise HTTPException(status_code=500, detail=f"降 AI 引擎服务异常: {str(exc)}")

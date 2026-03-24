@@ -107,6 +107,7 @@ async def generate_json(
     schema: dict,
     model: str | None = None,
     options: dict[str, Any] | None = None,
+    trace_label: str | None = None,
 ) -> dict:
     """调用 Ollama 生成结构化 JSON 响应，通过 format 字段传入 JSON Schema 约束输出格式。
 
@@ -133,7 +134,8 @@ async def generate_json(
         "options": merged_options,
     }
     logger.info(
-        "Calling Ollama JSON: base_url=%s model=%s prompt_len=%d schema_keys=%s think=%s options=%s",
+        "Calling Ollama JSON: trace=%s base_url=%s model=%s prompt_len=%d schema_keys=%s think=%s options=%s",
+        trace_label or "-",
         OLLAMA_BASE_URL,
         actual_model,
         len(user_prompt),
@@ -145,7 +147,7 @@ async def generate_json(
         raw = await _post_generate(payload)
         return _extract_json(raw)
     except Exception as exc:
-        logger.warning("Ollama schema JSON failed, retrying with format=json: %s", exc)
+        logger.warning("Ollama schema JSON failed, retrying with format=json: trace=%s error=%s", trace_label or "-", exc)
         fallback_payload = {
             **payload,
             "format": "json",
@@ -154,7 +156,7 @@ async def generate_json(
             raw = await _post_generate(fallback_payload)
             return _extract_json(raw)
         except Exception as retry_exc:
-            logger.exception("Ollama JSON generation failed after retry: %s", retry_exc)
+            logger.exception("Ollama JSON generation failed after retry: trace=%s error=%s", trace_label or "-", retry_exc)
             raise RuntimeError(f"Ollama JSON generation failed: {retry_exc}") from retry_exc
 
 

@@ -214,6 +214,8 @@ async def judge_chunk_with_qwen(
     genre: str,
     features: dict,
     model: str | None = None,
+    task_id: str | None = None,
+    chunk_id: int | None = None,
 ) -> dict:
     """调用 Qwen（本地 Ollama）对单个分块进行风格判断，返回 QwenJudgeResult dict。
 
@@ -253,6 +255,7 @@ async def judge_chunk_with_qwen(
             user_prompt=user_prompt,
             schema=_QWEN_JUDGE_SCHEMA,
             model=model,
+            trace_label=f"{task_id or '-'}:judge:chunk-{chunk_id if chunk_id is not None else 'na'}",
         )
         data = _normalize_qwen_result(data)
         # 用 Pydantic 校验模型返回格式，字段缺失或类型不符时会抛出 ValidationError
@@ -262,5 +265,11 @@ async def judge_chunk_with_qwen(
         return result
     except Exception as exc:
         # LLM 调用失败（超时、格式错误等），降级为启发式规则，记录警告日志
-        logger.warning("Qwen judge fallback triggered: %s", exc)
+        logger.warning(
+            "task=%s step=judge_chunk fallback=true chunk_id=%s model=%s error=%s",
+            task_id or "-",
+            chunk_id if chunk_id is not None else "na",
+            model or "default",
+            exc,
+        )
         return _heuristic_fallback(features, genre)
