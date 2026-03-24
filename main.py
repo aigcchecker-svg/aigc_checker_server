@@ -30,6 +30,7 @@ async def get_test_page():
             .token-row input { flex: 1; padding: 7px 10px; border: 1px solid #cbd5e1; border-radius: 5px; font-size: 14px; font-family: monospace; background: #fff; }
             .token-row input:focus { outline: none; border-color: #4f46e5; }
             .token-status { font-size: 12px; white-space: nowrap; }
+            .hint-box { margin: -4px 0 16px; padding: 10px 12px; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 6px; color: #1d4ed8; font-size: 13px; line-height: 1.5; }
             textarea { width: 100%; height: 200px; padding: 15px; border: 1px solid #ccc; border-radius: 6px; font-size: 15px; resize: vertical; box-sizing: border-box; }
             button { background-color: #4f46e5; color: white; border: none; padding: 12px 24px; font-size: 16px; border-radius: 6px; cursor: pointer; margin-top: 15px; transition: background 0.2s; }
             button:hover { background-color: #4338ca; }
@@ -76,6 +77,8 @@ async def get_test_page():
                     <option value="reduce">reduce（降 AI 改写）</option>
                 </select>
             </div>
+
+            <div class="hint-box" id="routingHint"></div>
 
             <textarea id="inputText" placeholder="请输入至少 50 个字符的文章进行测试...
 例如：
@@ -178,17 +181,33 @@ The advent of electric vehicles has been touted as a cornerstone in the transiti
                 const saved = sessionStorage.getItem('api_token');
                 if (saved) { document.getElementById('apiToken').value = saved; updateTokenStatus(); }
                 document.getElementById('apiSource').value = '__API_SOURCE__';
+                renderRoutingHint();
             });
 
             function onSourceChange() {
                 const source = document.getElementById('apiSource').value;
                 document.getElementById('modelInput').value = DEFAULT_MODELS[source] || '';
+                renderRoutingHint();
             }
 
             function onModeChange() {
                 const mode = document.getElementById('modeSelect').value;
                 document.getElementById('scanBtn').textContent =
                     mode === 'reduce' ? '发起降 AI 改写请求' : '发起 AI 检测请求';
+                renderRoutingHint();
+            }
+
+            function renderRoutingHint() {
+                const mode = document.getElementById('modeSelect').value;
+                const source = document.getElementById('apiSource').value;
+                const hint = document.getElementById('routingHint');
+                if (mode === 'reduce') {
+                    hint.textContent =
+                        '当前 reduce 固定策略：前后检测都走 Ollama；rewrite 优先使用 Azure GPT-4o，只有 Azure 失败时才回退到 OpenRouter qwen/qwen-plus。当前选择的 API Source=' + source + ' 仅作为请求兼容参数保留。';
+                    return;
+                }
+                hint.textContent =
+                    '当前 scan 主检测链路固定使用 Ollama。API Source=' + source + ' 仍可传递给接口，但不会改变 scan 的实际执行引擎。';
             }
 
             function updateTokenStatus() {

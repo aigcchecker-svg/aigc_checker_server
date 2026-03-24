@@ -16,7 +16,7 @@ except ImportError:  # pragma: no cover - fallback for minimal local env
 from services.aggregate import aggregate_document, score_chunk
 from services.features import extract_chunk_features, extract_document_features
 from services.judges import judge_chunk_with_qwen
-from services.ollama_client import OLLAMA_DEFAULT_MODEL, generate_json
+from services.ollama_client import OLLAMA_DEFAULT_MODEL
 from services.preprocess import chunk_text, clean_text, detect_genre, detect_language
 from services.prompts import REDUCE_REWRITE_SYSTEM_PROMPT, REMOTE_REVIEW_SYSTEM_PROMPT
 from services.schemas import ReduceRewriteResult, RemoteReviewResult
@@ -33,14 +33,17 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 API_SOURCE = os.getenv("API_SOURCE", "ollama").lower()
-AZURE_DEFAULT_MODEL = os.getenv("AZURE_DEPLOYMENT", "gpt-4o-mini")
-OPENROUTER_DEFAULT_MODEL = os.getenv("OPENROUTER_MODEL", "claude-3.5-haiku")
+SUPPORTED_API_SOURCES = {"ollama", "azure", "openrouter"}
+SCAN_API_SOURCE = "ollama"
+AZURE_DEFAULT_MODEL = os.getenv("AZURE_DEPLOYMENT", "gpt-4o")
+AZURE_REWRITE_DEPLOYMENT = os.getenv("AZURE_REWRITE_DEPLOYMENT", AZURE_DEFAULT_MODEL)
+OPENROUTER_DEFAULT_MODEL = os.getenv("OPENROUTER_MODEL", "qwen/qwen-plus")
+OPENROUTER_REWRITE_MODEL = os.getenv("OPENROUTER_REWRITE_MODEL", OPENROUTER_DEFAULT_MODEL)
 PROXY_BASE_URL = os.getenv("PROXY_BASE_URL", "http://119.28.110.115:5000")
 PROXY_TOKEN = os.getenv("PROXY_TOKEN", "10a8ed53-e497-4f59-9662-0c650dd889ff")
 PRO_REVIEW_SOURCE = os.getenv("PRO_REVIEW_SOURCE", "openrouter").lower()
 PRO_REVIEW_MODEL = os.getenv("PRO_REVIEW_MODEL", OPENROUTER_DEFAULT_MODEL)
-OLLAMA_REWRITE_NUM_CTX = int(os.getenv("OLLAMA_REWRITE_NUM_CTX", "4096"))
-OLLAMA_REWRITE_NUM_PREDICT = int(os.getenv("OLLAMA_REWRITE_NUM_PREDICT", "1024"))
+OPENROUTER_EXCLUDE_REASONING = os.getenv("OPENROUTER_EXCLUDE_REASONING", "true").lower() not in {"false", "0", "no"}
 # 远端二审全局开关，设为 false/0/no 可临时关闭，不影响本地检测流程
 REMOTE_REVIEW_ENABLED = os.getenv("REMOTE_REVIEW_ENABLED", "true").lower() not in {"false", "0", "no"}
 
@@ -53,12 +56,16 @@ def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
-def _default_model_for(source: str) -> str:
-    """根据 API 来源返回对应的默认推理模型名称。"""
-    if source == "azure":
-        return AZURE_DEFAULT_MODEL
-    if source == "openrouter":
-        return OPENROUTER_DEFAULT_MODEL
+def _normalize_api_source(source: str | None) -> str:
+    """规范化请求来源，未知值回退为默认来源。"""
+    normalized = (source or API_SOURCE).lower()
+    return normalized if normalized in SUPPORTED_API_SOURCES else API_SOURCE
+
+
+def _resolve_scan_model(requested_api_source: str, requested_model: str | None) -> str:
+    """scan 主链路固定走 Ollama，仅在明确请求 Ollama 时允许覆盖本地模型。"""
+    if requested_api_source == SCAN_API_SOURCE and requested_model:
+        return requested_model
     return OLLAMA_DEFAULT_MODEL
 
 
@@ -69,6 +76,14 @@ def _review_model_for(source: str) -> str:
     if source == "openrouter":
         return os.getenv("PRO_REVIEW_MODEL", OPENROUTER_DEFAULT_MODEL)
     return PRO_REVIEW_MODEL
+
+
+def _rewrite_attempts() -> list[tuple[str, str]]:
+    """返回固定的改写提供方顺序：先 Azure，再 OpenRouter。"""
+    return [
+        ("azure", AZURE_REWRITE_DEPLOYMENT),
+        ("openrouter", OPENROUTER_REWRITE_MODEL),
+    ]
 
 
 def _get_azure_client():
@@ -158,65 +173,62 @@ def _extract_json(text: str) -> dict:
         return json.loads(match.group(0))
 
 
-async def _call_remote_json(system_prompt: str, user_prompt: str, model: str | None, api_source: str) -> dict:
-    """统一的远端 LLM JSON 调用入口，支持 Azure 和 OpenRouter 两种后端。
+async def _call_azure_json(system_prompt: str, user_prompt: str, deployment_name: str, purpose: str) -> dict:
+    """调用 Azure OpenAI Chat Completions JSON 模式。
 
-    temperature 设为 0.2 以保证输出稳定性，返回值为解析后的 dict。
-    OpenRouter 支持 self（直连）和 proxy（代理转发）两种发送模式，通过环境变量控制。
+    Azure `model` 参数应传 deployment name，而不是公共模型 ID。
     """
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
     ]
-    actual_model = model or _default_model_for(api_source)
-
-    if api_source == "azure":
-        client = _get_azure_client()
-        if not client:
-            raise RuntimeError("Azure 未配置")
-        logger.info("Calling Azure model=%s for reduce", actual_model)
-        response = await client.chat.completions.create(
-            model=actual_model,
-            messages=messages,
-            response_format={"type": "json_object"},  # 强制 JSON 输出格式
-            temperature=0.2,
-        )
-        return _extract_json(response.choices[0].message.content)
-
-    if api_source == "openrouter":
-        send_mode = os.getenv("OPENROUTER_SEND_MODE", "self").lower()
-        if send_mode == "proxy":
-            # 走内部代理，适用于无法直连 OpenRouter 的环境
-            logger.info("Calling OpenRouter proxy model=%s for reduce", actual_model)
-            return _extract_json(await _send_by_proxy(messages, actual_model))
-
-        client = _get_openrouter_client()
-        if not client:
-            raise RuntimeError("OpenRouter 未配置")
-        logger.info("Calling OpenRouter self model=%s for reduce", actual_model)
-        response = await client.chat.completions.create(
-            model=actual_model,
-            messages=messages,
-            response_format={"type": "json_object"},
-            temperature=0.2,
-            extra_headers={
-                "HTTP-Referer": "https://aigcchecker.com",
-                "X-Title": "AIGC Checker Detection Engine",
-            },
-        )
-        return _extract_json(response.choices[0].message.content)
-
-    raise RuntimeError(f"Unsupported remote api_source: {api_source}")
+    client = _get_azure_client()
+    if not client:
+        raise RuntimeError("Azure 未配置")
+    logger.info("Calling Azure deployment=%s purpose=%s", deployment_name, purpose)
+    response = await client.chat.completions.create(
+        model=deployment_name,
+        messages=messages,
+        response_format={"type": "json_object"},
+        temperature=0.2,
+    )
+    return _extract_json(response.choices[0].message.content)
 
 
-def _rewrite_schema() -> dict:
-    """返回 ReduceRewriteResult 的 JSON Schema，供 Ollama 结构化输出使用。"""
-    return ReduceRewriteResult.model_json_schema()
+async def _call_openrouter_json(system_prompt: str, user_prompt: str, model_id: str, purpose: str) -> dict:
+    """调用 OpenRouter Chat Completions JSON 模式。
 
+    OpenRouter `model` 参数应传公开 model ID，例如 `qwen/qwen-plus`。
+    """
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+    send_mode = os.getenv("OPENROUTER_SEND_MODE", "self").lower()
+    if send_mode == "proxy":
+        logger.info("Calling OpenRouter proxy model=%s purpose=%s", model_id, purpose)
+        return _extract_json(await _send_by_proxy(messages, model_id))
 
-def _remote_review_schema() -> dict:
-    """返回 RemoteReviewResult 的 JSON Schema，供 Ollama 结构化输出使用。"""
-    return RemoteReviewResult.model_json_schema()
+    client = _get_openrouter_client()
+    if not client:
+        raise RuntimeError("OpenRouter 未配置")
+
+    request_kwargs = {
+        "model": model_id,
+        "messages": messages,
+        "response_format": {"type": "json_object"},
+        "temperature": 0.2,
+        "extra_headers": {
+            "HTTP-Referer": "https://aigcchecker.com",
+            "X-Title": "AIGC Checker Detection Engine",
+        },
+    }
+    if OPENROUTER_EXCLUDE_REASONING:
+        request_kwargs["extra_body"] = {"reasoning": {"exclude": True}}
+
+    logger.info("Calling OpenRouter self model=%s purpose=%s", model_id, purpose)
+    response = await client.chat.completions.create(**request_kwargs)
+    return _extract_json(response.choices[0].message.content)
 
 
 def _build_reduce_prompt(content: str, detection_result: dict) -> str:
@@ -398,12 +410,21 @@ async def _run_remote_review(content: str, result: dict) -> dict | None:
         return None
 
     try:
-        raw = await _call_remote_json(
-            REMOTE_REVIEW_SYSTEM_PROMPT,
-            _build_remote_review_prompt(content, result),
-            model=_review_model_for(PRO_REVIEW_SOURCE),
-            api_source=PRO_REVIEW_SOURCE,
-        )
+        review_prompt = _build_remote_review_prompt(content, result)
+        if PRO_REVIEW_SOURCE == "azure":
+            raw = await _call_azure_json(
+                REMOTE_REVIEW_SYSTEM_PROMPT,
+                review_prompt,
+                deployment_name=_review_model_for(PRO_REVIEW_SOURCE),
+                purpose="remote_review",
+            )
+        else:
+            raw = await _call_openrouter_json(
+                REMOTE_REVIEW_SYSTEM_PROMPT,
+                review_prompt,
+                model_id=_review_model_for(PRO_REVIEW_SOURCE),
+                purpose="remote_review",
+            )
         return RemoteReviewResult.model_validate(raw).model_dump()
     except Exception as exc:
         logger.warning("Remote review skipped due to error: %s", exc)
@@ -445,57 +466,54 @@ def _quality_score(original: str, rewritten: str, before: float, after: float) -
 async def _rewrite_content(content: str, detection_result: dict, model: str | None, api_source: str | None) -> dict:
     """调用 LLM 对原文进行降 AI 改写，返回 ReduceRewriteResult dict。
 
-    改写后端选择策略（检测与改写解耦）：
-    - 若请求方显式指定了 azure/openrouter，则直接使用指定来源
-    - 若检测走 Ollama（默认），改写优先路由到 OpenRouter（不同模型风格，更难被 Qwen 检测识别）
-    - OpenRouter 不可用时才回退到本地 Ollama
+    当前固定策略：
+    - scan 始终走 Ollama
+    - reduce 的 rewrite 始终优先走 Azure GPT-4o（deployment）
+    - 仅当 Azure 失败时，才回退到 OpenRouter 的 Qwen-Plus（model ID）
     改写失败时返回原文作为 fallback，并通过 rewrite=False 标记未成功改写。
     """
-    detection_source = (api_source or API_SOURCE).lower()
+    requested_api_source = _normalize_api_source(api_source)
     prompt = _build_reduce_prompt(content, detection_result)
-    schema = _rewrite_schema()
-
-    # 确定改写来源：显式指定远端时直接用，否则本地检测场景优先走 OpenRouter 解耦
-    if detection_source in {"azure", "openrouter"}:
-        rewrite_source = detection_source
-        rewrite_model = model
-    elif _get_openrouter_client() is not None:
-        # 检测用 Ollama，改写用 OpenRouter：不同模型风格令 Qwen 检测器难以识别
-        rewrite_source = "openrouter"
-        rewrite_model = model or OPENROUTER_DEFAULT_MODEL
-        logger.info("Rewrite routed to OpenRouter (%s) to decouple from Ollama detector", rewrite_model)
-    else:
-        rewrite_source = "ollama"
-        rewrite_model = model
-
-    try:
-        if rewrite_source in {"azure", "openrouter"}:
-            # 远端模型支持 json_object 格式，不需要显式传 schema
-            raw = await _call_remote_json(REDUCE_REWRITE_SYSTEM_PROMPT, prompt, model=rewrite_model, api_source=rewrite_source)
-        else:
-            # 改写输出包含完整文本，需显著提高 num_predict，避免被判别场景的小输出参数截断
-            raw = await generate_json(
-                REDUCE_REWRITE_SYSTEM_PROMPT,
-                prompt,
-                schema=schema,
-                model=rewrite_model or OLLAMA_DEFAULT_MODEL,
-                options={
-                    "temperature": 0.2,
-                    "num_ctx": OLLAMA_REWRITE_NUM_CTX,
-                    "num_predict": OLLAMA_REWRITE_NUM_PREDICT,
-                },
+    for rewrite_provider, provider_model in _rewrite_attempts():
+        try:
+            logger.info(
+                "Rewrite attempt provider=%s target_model=%s requested_api_source=%s requested_model=%s",
+                rewrite_provider,
+                provider_model,
+                requested_api_source,
+                model or "default",
             )
-        return ReduceRewriteResult.model_validate(raw).model_dump()
-    except Exception as exc:
-        logger.warning("Rewrite failed, falling back to original text: %s", exc)
-        # 降级返回原文，并显式标记本次改写失败
-        return ReduceRewriteResult(
-            reduced=content,
-            rewrite=False,
-            quality_score=55.0,
-            model="light",
-            changes=[],
-        ).model_dump()
+            if rewrite_provider == "azure":
+                raw = await _call_azure_json(
+                    REDUCE_REWRITE_SYSTEM_PROMPT,
+                    prompt,
+                    deployment_name=provider_model,
+                    purpose="rewrite",
+                )
+            else:
+                raw = await _call_openrouter_json(
+                    REDUCE_REWRITE_SYSTEM_PROMPT,
+                    prompt,
+                    model_id=provider_model,
+                    purpose="rewrite_fallback",
+                )
+            return ReduceRewriteResult.model_validate(raw).model_dump()
+        except Exception as exc:
+            logger.warning(
+                "Rewrite provider failed: provider=%s target_model=%s error=%s",
+                rewrite_provider,
+                provider_model,
+                exc,
+            )
+
+    logger.warning("Rewrite failed on all providers, falling back to original text")
+    return ReduceRewriteResult(
+        reduced=content,
+        rewrite=False,
+        quality_score=55.0,
+        model="light",
+        changes=[],
+    ).model_dump()
 
 
 async def run_check(
@@ -509,8 +527,8 @@ async def run_check(
 
     Args:
         content: 待检测的原始文本
-        model: 指定推理模型，None 时使用各来源默认模型
-        api_source: 推理后端来源（ollama/azure/openrouter）
+        model: 请求侧模型参数；当前仅在请求来源为 ollama 时才会覆盖本地检测模型
+        api_source: 请求侧来源（ollama/azure/openrouter），当前 scan 实际执行仍固定为 Ollama
         plan: 订阅套餐（free/pro），影响返回字段和二审权限
         can_remote_review: 是否允许触发 Pro 远端二审
 
@@ -518,22 +536,25 @@ async def run_check(
         包含 label、ai_probability、confidence、chunks 等字段的检测结果 dict
     """
     # Step 1: 文本预处理
+    requested_api_source = _normalize_api_source(api_source)
+    effective_scan_model = _resolve_scan_model(requested_api_source, model)
     cleaned = clean_text(content)
     language = detect_language(cleaned)
     genre = detect_genre(cleaned)
     doc_features = extract_document_features(cleaned, language=language)
     chunks = chunk_text(cleaned)
     logger.info(
-        "run_check params: api_source=%s requested_model=%s effective_local_model=%s plan=%s language=%s chars=%d chunks=%d",
-        api_source or API_SOURCE,
+        "run_check params: requested_api_source=%s requested_model=%s scan_source=%s scan_model=%s plan=%s language=%s chars=%d chunks=%d",
+        requested_api_source,
         model,
-        model or OLLAMA_DEFAULT_MODEL,
+        SCAN_API_SOURCE,
+        effective_scan_model,
         plan,
         language,
         len(cleaned),
         len(chunks),
     )
-    logger.info("Running check: genre=%s, model=%s, chunks=%d", genre, model or OLLAMA_DEFAULT_MODEL, len(chunks))
+    logger.info("Running check: genre=%s, scan_source=%s, model=%s, chunks=%d", genre, SCAN_API_SOURCE, effective_scan_model, len(chunks))
 
     # Step 2: 逐分块提取特征 + LLM 打分 + 规则综合评分
     enriched_chunks: list[dict] = []
@@ -541,7 +562,7 @@ async def run_check(
         chunk_language = detect_language(chunk["text"]) if language == "mixed" else language
         features = extract_chunk_features(chunk["text"], language=chunk_language)
         # 调用 Qwen 本地模型对分块进行风格判断，失败时自动降级为启发式规则
-        qwen_result = await judge_chunk_with_qwen(chunk["text"], genre, features, model=model or OLLAMA_DEFAULT_MODEL)
+        qwen_result = await judge_chunk_with_qwen(chunk["text"], genre, features, model=effective_scan_model)
         # 融合 LLM 分数（55%）、统计特征分（30%）、风格信号分（15%）
         scored = score_chunk(features, qwen_result, genre)
         enriched_chunks.append(
@@ -562,8 +583,10 @@ async def run_check(
     result = aggregate_document(enriched_chunks, genre, doc_features)
     result["engine"] = {
         "checker": "hybrid-local",
-        "qwen_model": model or OLLAMA_DEFAULT_MODEL,
-        "api_source": api_source or API_SOURCE,
+        "requested_api_source": requested_api_source,
+        "requested_model": model,
+        "scan_api_source": SCAN_API_SOURCE,
+        "qwen_model": effective_scan_model,
     }
 
     # Step 4: 判断是否需要触发 Pro 远端二审，并在结果中记录二审元数据
@@ -594,7 +617,7 @@ async def run_reduce(
     plan: str = "pro",
     can_remote_review: bool = False,
 ) -> dict:
-    """降 AI 改写主流程：先检测 → 改写 → 再检测 → 计算质量分。
+    """降 AI 改写主流程：先 Ollama 检测 → Azure 改写 → OpenRouter 兜底 → 再检测 → 计算质量分。
 
     流程：
     1. run_check 获取原文 AI 概率及高风险分块信息

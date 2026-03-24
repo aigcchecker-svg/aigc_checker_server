@@ -74,7 +74,13 @@ class ScanRequest(BaseModel):
 
 def _log(tag: str, request: ScanRequest, text_len: int) -> None:
     """记录请求日志，包含操作标签、模型名、API 来源和文本长度，便于问题排查。"""
-    logger.info("[%s] model=%s api_source=%s chars=%d", tag, request.model or "default", request.api_source, text_len)
+    logger.info(
+        "[%s] requested_model=%s requested_api_source=%s chars=%d",
+        tag,
+        request.model or "default",
+        request.api_source,
+        text_len,
+    )
 
 
 @router.post("/scan")
