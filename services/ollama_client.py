@@ -160,23 +160,39 @@ async def generate_json(
             raise RuntimeError(f"Ollama JSON generation failed: {retry_exc}") from retry_exc
 
 
-async def generate_text(system_prompt: str, user_prompt: str, model: str | None = None) -> str:
+async def generate_text(
+    system_prompt: str,
+    user_prompt: str,
+    model: str | None = None,
+    options: dict[str, Any] | None = None,
+    trace_label: str | None = None,
+) -> str:
     """调用 Ollama 生成纯文本响应（不使用 Schema 约束）。
 
     temperature 设为 0.3，比 JSON 模式略高，允许适度的表达多样性（适合改写场景）。
     """
     actual_model = model or OLLAMA_DEFAULT_MODEL
+    merged_options = {"temperature": 0.3}
+    if options:
+        merged_options.update(options)
+
     payload = {
         "model": actual_model,
         "system": system_prompt,
         "prompt": user_prompt,
         "stream": False,
         "think": not OLLAMA_DISABLE_THINKING,
-        "options": {"temperature": 0.3},
+        "options": merged_options,
     }
-    logger.info("Calling Ollama text model=%s think=%s", actual_model, payload.get("think"))
+    logger.info(
+        "Calling Ollama text: trace=%s model=%s think=%s options=%s",
+        trace_label or "-",
+        actual_model,
+        payload.get("think"),
+        payload.get("options"),
+    )
     try:
         return await _post_generate(payload)
     except Exception as exc:
-        logger.exception("Ollama text generation failed: %s", exc)
+        logger.exception("Ollama text generation failed: trace=%s error=%s", trace_label or "-", exc)
         raise RuntimeError(f"Ollama text generation failed: {exc}") from exc

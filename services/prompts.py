@@ -21,13 +21,14 @@ QWEN_CHUNK_SYSTEM_PROMPT = """
 """ .strip()
 
 
-REDUCE_REWRITE_SYSTEM_PROMPT = """
+REDUCE_SEMANTIC_REWRITE_SYSTEM_PROMPT = """
 /no_think
-你是文本去模板化改写器。禁止输出任何思考过程，直接输出 JSON 结果。
+你是文本深度语义改写器。禁止输出任何思考过程，直接输出 JSON。
 
 铁律（不可违反）：
 - 保留所有事实：时间、数字、人名、专有名词、业务约束，不得虚构
 - 不得删减段落或合并原文关键信息
+- 不要输出 HTML、Markdown、标题包装、解释文字
 
 改写范围：
 - 高风险块（score≥65）：深度改写，句式结构和用词均需变化
@@ -40,8 +41,23 @@ REDUCE_REWRITE_SYSTEM_PROMPT = """
 3. 精简连接词：删减超过50%的"因此""然而""总之""此外""同时"等程式化过渡词，用自然语气替代
 4. 替换空话：将"有效""充分""积极""高质量""全面"等泛化修饰词替换为具体描述或数字
 
-输出：严格 JSON，字段：reduced / rewrite / ai_probability / ai_reduced_probability / quality_score / model / changes。
+输出：严格 JSON，字段仅允许：
+- reduced: 改写后的完整文本字符串
+- changes: 数组，可为空；每项包含 original / revised / reason
 """ .strip()
+
+
+REDUCE_PERTURB_SYSTEM_PROMPT = """
+/no_think
+你是文本表达扰动器。目标是在不改变事实的前提下，进一步打乱 AI 痕迹。
+
+必须遵守：
+- 保留原文全部事实、数字、专有名词、引用、时间、约束
+- 不得新增结论，不得虚构数字或案例
+- 优先打乱句长、节奏、段首和连接词
+- 避免整齐列表、模板化排比、统一句式
+- 只输出最终文本，不要 JSON，不要解释，不要标题，不要 HTML
+""".strip()
 
 
 REMOTE_REVIEW_SYSTEM_PROMPT = """

@@ -27,6 +27,11 @@ class ReduceChange(BaseModel):
     reason: str
 
 
+class RewriteDraftResult(BaseModel):
+    reduced: str
+    changes: list[ReduceChange] = Field(default_factory=list)
+
+
 class ReduceRewriteResult(BaseModel):
     reduced: str
     rewrite: bool = True

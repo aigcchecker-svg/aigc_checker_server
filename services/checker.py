@@ -17,10 +17,14 @@ except ImportError:  # pragma: no cover - fallback for minimal local env
 from services.aggregate import aggregate_document, score_chunk
 from services.features import extract_chunk_features, extract_document_features
 from services.judges import judge_chunk_with_qwen
-from services.ollama_client import OLLAMA_DEFAULT_MODEL
+from services.ollama_client import OLLAMA_DEFAULT_MODEL, generate_text
 from services.preprocess import chunk_text, clean_text, detect_genre, detect_language
-from services.prompts import REDUCE_REWRITE_SYSTEM_PROMPT, REMOTE_REVIEW_SYSTEM_PROMPT
-from services.schemas import ReduceRewriteResult, RemoteReviewResult
+from services.prompts import (
+    REDUCE_PERTURB_SYSTEM_PROMPT,
+    REDUCE_SEMANTIC_REWRITE_SYSTEM_PROMPT,
+    REMOTE_REVIEW_SYSTEM_PROMPT,
+)
+from services.schemas import ReduceRewriteResult, RemoteReviewResult, RewriteDraftResult
 
 
 logging.basicConfig(
@@ -40,6 +44,9 @@ AZURE_DEFAULT_MODEL = os.getenv("AZURE_DEPLOYMENT", "gpt-4o")
 AZURE_REWRITE_DEPLOYMENT = os.getenv("AZURE_REWRITE_DEPLOYMENT", AZURE_DEFAULT_MODEL)
 OPENROUTER_DEFAULT_MODEL = os.getenv("OPENROUTER_MODEL", "qwen/qwen-plus")
 OPENROUTER_REWRITE_MODEL = os.getenv("OPENROUTER_REWRITE_MODEL", OPENROUTER_DEFAULT_MODEL)
+OLLAMA_REWRITE_MODEL = os.getenv("OLLAMA_REWRITE_MODEL", OLLAMA_DEFAULT_MODEL)
+OLLAMA_REWRITE_NUM_CTX = int(os.getenv("OLLAMA_REWRITE_NUM_CTX", "4096"))
+OLLAMA_REWRITE_NUM_PREDICT = int(os.getenv("OLLAMA_REWRITE_NUM_PREDICT", "1024"))
 PROXY_BASE_URL = os.getenv("PROXY_BASE_URL", "http://119.28.110.115:5000")
 PROXY_TOKEN = os.getenv("PROXY_TOKEN", "10a8ed53-e497-4f59-9662-0c650dd889ff")
 PRO_REVIEW_SOURCE = os.getenv("PRO_REVIEW_SOURCE", "openrouter").lower()
@@ -93,12 +100,19 @@ def _review_model_for(source: str) -> str:
     return PRO_REVIEW_MODEL
 
 
-def _rewrite_attempts() -> list[tuple[str, str]]:
-    """返回固定的改写提供方顺序：先 Azure，再 OpenRouter。"""
+def _semantic_rewrite_attempts() -> list[tuple[str, str]]:
+    """返回深度语义改写的提供方顺序：先 Azure，再 OpenRouter。"""
     return [
         ("azure", AZURE_REWRITE_DEPLOYMENT),
         ("openrouter", OPENROUTER_REWRITE_MODEL),
     ]
+
+
+def _resolve_perturb_model(requested_api_source: str, requested_model: str | None) -> str:
+    """扰动步骤固定走 Ollama；若请求本身指定了本地模型，则优先沿用。"""
+    if requested_api_source == "ollama" and requested_model:
+        return requested_model
+    return OLLAMA_REWRITE_MODEL
 
 
 def _get_azure_client():
@@ -194,16 +208,6 @@ def _strip_html(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
 
-def _format_probability(value, default: str = "0.00") -> str:
-    """将概率字段规范为保留两位小数的字符串。"""
-    try:
-        if value is None or value == "":
-            return default
-        return f"{float(value):.2f}"
-    except (TypeError, ValueError):
-        return default
-
-
 def _normalize_reduce_changes(changes) -> list[dict]:
     """宽松规范化 changes，兼容字符串列表和宽松字典结构。"""
     normalized: list[dict] = []
@@ -231,49 +235,89 @@ def _normalize_reduce_changes(changes) -> list[dict]:
     return normalized
 
 
-def _normalize_rewrite_result(raw: dict, original_content: str) -> dict:
-    """将 Azure/OpenRouter 的宽松 JSON 结果规范成 ReduceRewriteResult 可接受的结构。"""
+def _normalize_rewrite_draft(raw: dict, original_content: str) -> dict:
+    """将模型返回的宽松改写结果压缩成最小草稿结构：reduced + changes。"""
     if not isinstance(raw, dict):
-        raise ValueError("rewrite result must be a dict")
-
-    reduced_candidate = raw.get("reduced")
-    rewrite_candidate = raw.get("rewrite")
+        raise ValueError("rewrite draft must be a dict")
 
     reduced_text = ""
-    if isinstance(reduced_candidate, str) and reduced_candidate.strip():
-        reduced_text = reduced_candidate
-    elif isinstance(rewrite_candidate, str) and rewrite_candidate.strip():
-        # 某些模型会把 rewrite 字段误写成改写正文
-        reduced_text = rewrite_candidate
-    elif isinstance(raw.get("content"), str) and raw.get("content", "").strip():
-        reduced_text = raw["content"]
-
-    reduced_text = _strip_html(reduced_text) if reduced_text else original_content
-    rewrite_flag = raw.get("rewrite")
-    if isinstance(rewrite_flag, bool):
-        rewrite_success = rewrite_flag
-    else:
-        rewrite_success = bool(reduced_text and reduced_text != original_content)
-
-    model_value = str(raw.get("model") or "moderate").lower()
-    if model_value not in {"light", "moderate", "deep"}:
-        model_value = "moderate"
-
-    quality = raw.get("quality_score", 0)
-    try:
-        quality_score = round(_clamp(float(quality), 0, 100), 2)
-    except (TypeError, ValueError):
-        quality_score = 0.0
+    for key in ("reduced", "rewrite", "content", "text", "output"):
+        candidate = raw.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            reduced_text = candidate
+            break
 
     return {
-        "reduced": reduced_text,
-        "rewrite": rewrite_success,
-        "ai_probability": _format_probability(raw.get("ai_probability")),
-        "ai_reduced_probability": _format_probability(raw.get("ai_reduced_probability")),
-        "quality_score": quality_score,
-        "model": model_value,
+        "reduced": _strip_html(reduced_text) if reduced_text else original_content,
         "changes": _normalize_reduce_changes(raw.get("changes")),
     }
+
+
+def _normalize_compare_text(text: str) -> str:
+    """生成宽松比较串，便于判断一句话是否已经存在于另一版本文本中。"""
+    return re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", text.lower())
+
+
+def _split_text_units(text: str) -> list[str]:
+    """按句子或独立行拆分文本，兼容中英文和列表型输出。"""
+    units: list[str] = []
+    for block in re.split(r"\n+", text):
+        block = block.strip()
+        if not block:
+            continue
+        parts = re.split(r"(?<=[。！？!?\.])\s+", block)
+        for part in parts:
+            cleaned = part.strip()
+            if cleaned:
+                units.append(cleaned)
+    return units
+
+
+def _detail_score(sentence: str) -> int:
+    """估算句子的细节密度，用于挑选更像人类写作的锚点句。"""
+    score = 0
+    if re.search(r"\d", sentence):
+        score += 3
+    if re.search(r"%|[$¥€]|kg|km|ms|mb|gb|q[1-4]\b", sentence, re.IGNORECASE):
+        score += 2
+    if re.search(r"[“”\"'‘’()（）:/-]", sentence):
+        score += 1
+    if len(re.findall(r"\b[A-Z][a-z]+\b", sentence)) >= 2:
+        score += 1
+    return score
+
+
+def _select_detail_anchors(text: str, limit: int = 2) -> list[str]:
+    """从原文中提取带数字/细节的锚点句，用于规则注入。"""
+    ranked = sorted(
+        ((sentence, _detail_score(sentence)) for sentence in _split_text_units(text)),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    anchors: list[str] = []
+    for sentence, score in ranked:
+        if score <= 0:
+            continue
+        if len(sentence) < 18 or len(sentence) > 260:
+            continue
+        anchors.append(sentence)
+        if len(anchors) >= limit:
+            break
+    return anchors
+
+
+def _prefix_changes(step_label: str, changes: list[dict], limit: int = 8) -> list[dict]:
+    """给 changes 增加步骤前缀，便于追踪是哪一步做了修改。"""
+    prefixed: list[dict] = []
+    for item in changes[:limit]:
+        prefixed.append(
+            {
+                "original": item.get("original", ""),
+                "revised": item.get("revised", ""),
+                "reason": f"{step_label}: {item.get('reason', '').strip()}".strip(": "),
+            }
+        )
+    return prefixed
 
 
 async def _call_azure_json(system_prompt: str, user_prompt: str, deployment_name: str, purpose: str, task_id: str | None = None) -> dict:
@@ -334,15 +378,10 @@ async def _call_openrouter_json(system_prompt: str, user_prompt: str, model_id: 
     return _extract_json(response.choices[0].message.content)
 
 
-def _build_reduce_prompt(content: str, detection_result: dict) -> str:
-    """构建降 AI 改写的用户 Prompt，携带检测结果摘要、统计特征目标和分块信息。
-
-    改写范围扩展至 score>=40 的中高风险块（最多 8 个，按风险降序），
-    同时传入具体的统计特征偏差，让模型知道需要改变哪些可测量指标。
-    """
+def _build_semantic_rewrite_prompt(content: str, detection_result: dict) -> str:
+    """构建深度语义改写 Prompt，聚焦高风险分块和文档统计特征。"""
     doc_features = detection_result.get("document_features", {})
 
-    # 按 ai_score 降序，纳入所有 score>=40 的中高风险块，最多 8 个
     risk_chunks = sorted(
         [c for c in detection_result.get("chunks", []) if c.get("ai_score", 0) >= 40],
         key=lambda c: c.get("ai_score", 0),
@@ -353,7 +392,6 @@ def _build_reduce_prompt(content: str, detection_result: dict) -> str:
         for c in risk_chunks
     ]
 
-    # 根据统计特征生成具体改写目标，让模型有明确的可测量目标
     feature_targets = []
     if doc_features.get("burstiness", 1.0) < 0.3:
         feature_targets.append("句长过于均匀（burstiness 低），需在段落中插入短句（≤10字）或超长句（≥40字）")
@@ -377,6 +415,102 @@ def _build_reduce_prompt(content: str, detection_result: dict) -> str:
         f"{json.dumps(chunk_payload, ensure_ascii=False)}\n\n"
         f"原始文本:\n{content}"
     )
+
+
+def _build_perturb_prompt(original_content: str, rewritten_text: str, detection_result: dict) -> str:
+    """构建 Ollama 扰动 Prompt，要求在现有改写稿上继续打散表达。"""
+    analysis = detection_result.get("analysis", {})
+    return (
+        f"文体: {analysis.get('genre')}\n"
+        f"目标:\n"
+        f"- 打乱段首和句长节奏，避免连续同长度句子\n"
+        f"- 弱化列表感、总结腔、模板化连接词\n"
+        f"- 保留原文中的数字、专有名词、时间和业务约束\n\n"
+        f"原文（仅作事实校对，不要照抄）:\n{original_content}\n\n"
+        f"当前改写稿（在此基础上继续扰动）:\n{rewritten_text}\n\n"
+        "只输出最终文本。"
+    )
+
+
+def _collapse_list_style(text: str) -> tuple[str, list[dict]]:
+    """将过度整齐的短句列表合并为更自然的段落节奏。"""
+    lines = [line.strip(" -\t") for line in text.splitlines() if line.strip()]
+    if len(lines) < 4:
+        return text, []
+    short_lines = [line for line in lines if len(line.split()) <= 18 and len(line) <= 120]
+    if len(short_lines) < max(3, len(lines) - 1):
+        return text, []
+
+    merged = []
+    buffer: list[str] = []
+    for line in lines:
+        buffer.append(line.rstrip(".;。；"))
+        if len(buffer) == 2:
+            merged.append("; ".join(buffer) + ".")
+            buffer = []
+    if buffer:
+        merged.append(buffer[0] if buffer[0].endswith((".", "!", "?", "。", "！", "？")) else buffer[0] + ".")
+
+    updated = "\n\n".join(merged).strip()
+    if not updated or updated == text.strip():
+        return text, []
+    return updated, [
+        {
+            "original": text[:120],
+            "revised": updated[:120],
+            "reason": "将整齐列表感合并为更自然的段落节奏",
+        }
+    ]
+
+
+def _inject_detail_anchors(original_text: str, rewritten_text: str) -> tuple[str, list[dict]]:
+    """补回原文中的数字/细节锚点，避免改写后过于抽象。"""
+    anchors = _select_detail_anchors(original_text, limit=2)
+    if not anchors:
+        return rewritten_text, []
+
+    rewritten_norm = _normalize_compare_text(rewritten_text)
+    missing = [sentence for sentence in anchors if _normalize_compare_text(sentence) not in rewritten_norm]
+    if not missing:
+        return rewritten_text, []
+
+    updated = rewritten_text.rstrip()
+    if updated and not updated.endswith((".", "!", "?", "。", "！", "？")):
+        updated += "."
+    updated = f"{updated}\n\n{' '.join(missing)}".strip()
+    return updated, [
+        {
+            "original": "",
+            "revised": missing_sentence,
+            "reason": "补回原文中的数字或具体细节锚点",
+        }
+        for missing_sentence in missing
+    ]
+
+
+def _rule_injection_step(original_text: str, current_text: str) -> dict:
+    """规则注入：恢复细节锚点并削弱列表化表达。"""
+    updated_text = current_text
+    changes: list[dict] = []
+
+    collapsed_text, collapse_changes = _collapse_list_style(updated_text)
+    if collapse_changes:
+        updated_text = collapsed_text
+        changes.extend(collapse_changes)
+
+    anchored_text, detail_changes = _inject_detail_anchors(original_text, updated_text)
+    if detail_changes:
+        updated_text = anchored_text
+        changes.extend(detail_changes)
+
+    return {
+        "name": "rule_injection",
+        "provider": "rules",
+        "model": "deterministic",
+        "applied": updated_text != current_text,
+        "text": updated_text,
+        "changes": _prefix_changes("规则注入", changes),
+    }
 
 
 def _build_remote_review_prompt(content: str, detection_result: dict) -> str:
@@ -568,22 +702,17 @@ def _quality_score(original: str, rewritten: str, before: float, after: float) -
     return round(_clamp(0.6 * preservation + 0.4 * improvement, 0, 100), 2)
 
 
-async def _rewrite_content(content: str, detection_result: dict, model: str | None, api_source: str | None, task_id: str | None = None) -> dict:
-    """调用 LLM 对原文进行降 AI 改写，返回 ReduceRewriteResult dict。
-
-    当前固定策略：
-    - scan 始终走 Ollama
-    - reduce 的 rewrite 始终优先走 Azure GPT-4o（deployment）
-    - 仅当 Azure 失败时，才回退到 OpenRouter 的 Qwen-Plus（model ID）
-    改写失败时返回原文作为 fallback，并通过 rewrite=False 标记未成功改写。
-    """
+async def _semantic_rewrite_step(content: str, detection_result: dict, model: str | None, api_source: str | None, task_id: str | None = None) -> dict:
+    """Step1：先远端做深度语义改写，固定 Azure 优先，失败再回退 OpenRouter。"""
     requested_api_source = _normalize_api_source(api_source)
-    prompt = _build_reduce_prompt(content, detection_result)
-    for rewrite_provider, provider_model in _rewrite_attempts():
+    prompt = _build_semantic_rewrite_prompt(content, detection_result)
+
+    for rewrite_provider, provider_model in _semantic_rewrite_attempts():
         try:
             _log_task(
                 task_id,
-                "rewrite.attempt",
+                "rewrite.step.start",
+                step="semantic_rewrite",
                 provider=rewrite_provider,
                 target_model=provider_model,
                 requested_api_source=requested_api_source,
@@ -591,33 +720,188 @@ async def _rewrite_content(content: str, detection_result: dict, model: str | No
             )
             if rewrite_provider == "azure":
                 raw = await _call_azure_json(
-                    REDUCE_REWRITE_SYSTEM_PROMPT,
+                    REDUCE_SEMANTIC_REWRITE_SYSTEM_PROMPT,
                     prompt,
                     deployment_name=provider_model,
-                    purpose="rewrite",
+                    purpose="semantic_rewrite",
                     task_id=task_id,
                 )
             else:
                 raw = await _call_openrouter_json(
-                    REDUCE_REWRITE_SYSTEM_PROMPT,
+                    REDUCE_SEMANTIC_REWRITE_SYSTEM_PROMPT,
                     prompt,
                     model_id=provider_model,
-                    purpose="rewrite_fallback",
+                    purpose="semantic_rewrite_fallback",
                     task_id=task_id,
                 )
-            normalized = _normalize_rewrite_result(raw, content)
-            _log_task(task_id, "rewrite.success", provider=rewrite_provider, target_model=provider_model, rewrite=normalized.get("rewrite"))
-            return ReduceRewriteResult.model_validate(normalized).model_dump()
+            normalized = _normalize_rewrite_draft(raw, content)
+            draft = RewriteDraftResult.model_validate(normalized).model_dump()
+            reduced_text = clean_text(draft["reduced"] or content)
+            applied = bool(reduced_text and reduced_text != clean_text(content))
+            _log_task(
+                task_id,
+                "rewrite.step.finish",
+                step="semantic_rewrite",
+                provider=rewrite_provider,
+                target_model=provider_model,
+                applied=applied,
+                chars=len(reduced_text),
+            )
+            return {
+                "name": "semantic_rewrite",
+                "provider": rewrite_provider,
+                "model": provider_model,
+                "applied": applied,
+                "text": reduced_text if applied else clean_text(content),
+                "changes": _prefix_changes("深度重写", draft.get("changes", [])),
+            }
         except Exception as exc:
-            _log_task(task_id, "rewrite.failure", provider=rewrite_provider, target_model=provider_model, error=exc)
+            _log_task(
+                task_id,
+                "rewrite.step.failure",
+                step="semantic_rewrite",
+                provider=rewrite_provider,
+                target_model=provider_model,
+                error=exc,
+            )
 
-    _log_task(task_id, "rewrite.fallback", reason="all_providers_failed")
+    return {
+        "name": "semantic_rewrite",
+        "provider": "fallback",
+        "model": None,
+        "applied": False,
+        "text": clean_text(content),
+        "changes": [],
+    }
+
+
+async def _perturb_expression_step(original_text: str, current_text: str, detection_result: dict, model: str | None, api_source: str | None, task_id: str | None = None) -> dict:
+    """Step2：用本地 Ollama Qwen 对改写稿做二次扰动，打散表达痕迹。"""
+    perturb_model = _resolve_perturb_model(_normalize_api_source(api_source), model)
+    prompt = _build_perturb_prompt(original_text, current_text, detection_result)
+    try:
+        _log_task(
+            task_id,
+            "rewrite.step.start",
+            step="expression_perturb",
+            provider="ollama",
+            target_model=perturb_model,
+        )
+        rewritten = await generate_text(
+            system_prompt=REDUCE_PERTURB_SYSTEM_PROMPT,
+            user_prompt=prompt,
+            model=perturb_model,
+            options={
+                "temperature": 0.45,
+                "num_ctx": OLLAMA_REWRITE_NUM_CTX,
+                "num_predict": OLLAMA_REWRITE_NUM_PREDICT,
+            },
+            trace_label=f"{task_id or '-'}:rewrite:expression_perturb",
+        )
+        perturbed_text = clean_text(_strip_html(rewritten) or current_text)
+        applied = bool(perturbed_text and perturbed_text != current_text)
+        _log_task(
+            task_id,
+            "rewrite.step.finish",
+            step="expression_perturb",
+            provider="ollama",
+            target_model=perturb_model,
+            applied=applied,
+            chars=len(perturbed_text),
+        )
+        changes = []
+        if applied:
+            changes.append(
+                {
+                    "original": current_text[:120],
+                    "revised": perturbed_text[:120],
+                    "reason": "继续打散句长、段首和连接词节奏",
+                }
+            )
+        return {
+            "name": "expression_perturb",
+            "provider": "ollama",
+            "model": perturb_model,
+            "applied": applied,
+            "text": perturbed_text if applied else current_text,
+            "changes": _prefix_changes("表达扰动", changes),
+        }
+    except Exception as exc:
+        _log_task(
+            task_id,
+            "rewrite.step.failure",
+            step="expression_perturb",
+            provider="ollama",
+            target_model=perturb_model,
+            error=exc,
+        )
+        return {
+            "name": "expression_perturb",
+            "provider": "ollama",
+            "model": perturb_model,
+            "applied": False,
+            "text": current_text,
+            "changes": [],
+        }
+
+
+def _rewrite_pipeline_steps() -> list[str]:
+    """当前 reduce 的组合式 rewrite 流程，后续新增方法时只需继续追加步骤。"""
+    return ["semantic_rewrite", "expression_perturb", "rule_injection"]
+
+
+async def _rewrite_content(content: str, detection_result: dict, model: str | None, api_source: str | None, task_id: str | None = None) -> dict:
+    """执行组合式 rewrite：深度重写 -> 表达扰动 -> 规则注入。"""
+    pipeline = _rewrite_pipeline_steps()
+    _log_task(task_id, "rewrite.pipeline.start", steps=",".join(pipeline))
+
+    semantic_step = await _semantic_rewrite_step(content, detection_result, model=model, api_source=api_source, task_id=task_id)
+    if not semantic_step.get("applied"):
+        _log_task(task_id, "rewrite.fallback", reason="semantic_rewrite_failed")
+        return ReduceRewriteResult(
+            reduced=content,
+            rewrite=False,
+            quality_score=55.0,
+            model="light",
+            changes=[],
+        ).model_dump()
+
+    current_text = semantic_step["text"]
+    aggregated_changes = list(semantic_step.get("changes", []))
+    applied_steps = ["semantic_rewrite"]
+
+    perturb_step = await _perturb_expression_step(
+        original_text=content,
+        current_text=current_text,
+        detection_result=detection_result,
+        model=model,
+        api_source=api_source,
+        task_id=task_id,
+    )
+    if perturb_step.get("applied"):
+        current_text = perturb_step["text"]
+        aggregated_changes.extend(perturb_step.get("changes", []))
+        applied_steps.append("expression_perturb")
+    else:
+        _log_task(task_id, "rewrite.step.skip", step="expression_perturb", reason="no_text_change")
+
+    _log_task(task_id, "rewrite.step.start", step="rule_injection", provider="rules", target_model="deterministic")
+    rule_step = _rule_injection_step(content, current_text)
+    if rule_step.get("applied"):
+        current_text = rule_step["text"]
+        aggregated_changes.extend(rule_step.get("changes", []))
+        applied_steps.append("rule_injection")
+        _log_task(task_id, "rewrite.step.finish", step="rule_injection", provider="rules", target_model="deterministic", applied=True, chars=len(current_text))
+    else:
+        _log_task(task_id, "rewrite.step.skip", step="rule_injection", reason="no_rule_adjustment")
+
+    model_level = "deep" if len(applied_steps) >= 3 else "moderate"
     return ReduceRewriteResult(
-        reduced=content,
-        rewrite=False,
-        quality_score=55.0,
-        model="light",
-        changes=[],
+        reduced=current_text,
+        rewrite=current_text != clean_text(content),
+        quality_score=0.0,
+        model=model_level,
+        changes=aggregated_changes[:8],
     ).model_dump()
 
 
@@ -779,6 +1063,16 @@ async def run_reduce(
     after = float(reduced_result["ai_probability"])
     rewrite_succeeded = bool(rewrite_result.get("rewrite", True))
     quality = rewrite_result.get("quality_score", 55.0) if not rewrite_succeeded else _quality_score(content, reduced_text, before, after)
+
+    if rewrite_succeeded and after >= before:
+        _log_task(task_id, "reduce.guard.rollback", reason="probability_not_improved", before=f"{before:.2f}", after=f"{after:.2f}")
+        reduced_text = clean_text(content)
+        after = before
+        rewrite_succeeded = False
+        quality = 55.0
+        rewrite_result["changes"] = []
+        rewrite_result["model"] = "light"
+
     _log_task(task_id, "reduce.finish", rewrite=rewrite_succeeded, before=f"{before:.2f}", after=f"{after:.2f}", quality=quality)
 
     return {

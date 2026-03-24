@@ -156,7 +156,7 @@ The advent of electric vehicles has been touted as a cornerstone in the transiti
   "ai_probability": "58.32",
   "ai_reduced_probability": "31.07",
   "quality_score": 74.5,
-  "model": "moderate",
+  "model": "deep",
   "changes": [
     {
       "original": "首先，企业需要建立统一规范。",
@@ -203,7 +203,7 @@ The advent of electric vehicles has been touted as a cornerstone in the transiti
                 const hint = document.getElementById('routingHint');
                 if (mode === 'reduce') {
                     hint.textContent =
-                        '当前 reduce 固定策略：前后检测都走 Ollama；rewrite 优先使用 Azure GPT-4o，只有 Azure 失败时才回退到 OpenRouter qwen/qwen-plus。当前选择的 API Source=' + source + ' 仅作为请求兼容参数保留。';
+                        '当前 reduce 固定策略：前后检测都走 Ollama；rewrite 采用组合流水线：Step1 Azure GPT-4o 深度重写（失败时回退 OpenRouter qwen/qwen-plus），Step2 Ollama Qwen 扰动表达，Step3 规则注入细节与数字锚点。当前选择的 API Source=' + source + ' 仅作为请求兼容参数保留。';
                     return;
                 }
                 hint.textContent =
