@@ -39,6 +39,8 @@ PROXY_BASE_URL = os.getenv("PROXY_BASE_URL", "http://119.28.110.115:5000")
 PROXY_TOKEN = os.getenv("PROXY_TOKEN", "10a8ed53-e497-4f59-9662-0c650dd889ff")
 PRO_REVIEW_SOURCE = os.getenv("PRO_REVIEW_SOURCE", "openrouter").lower()
 PRO_REVIEW_MODEL = os.getenv("PRO_REVIEW_MODEL", OPENROUTER_DEFAULT_MODEL)
+OLLAMA_REWRITE_NUM_CTX = int(os.getenv("OLLAMA_REWRITE_NUM_CTX", "4096"))
+OLLAMA_REWRITE_NUM_PREDICT = int(os.getenv("OLLAMA_REWRITE_NUM_PREDICT", "1024"))
 # 远端二审全局开关，设为 false/0/no 可临时关闭，不影响本地检测流程
 REMOTE_REVIEW_ENABLED = os.getenv("REMOTE_REVIEW_ENABLED", "true").lower() not in {"false", "0", "no"}
 
@@ -471,8 +473,18 @@ async def _rewrite_content(content: str, detection_result: dict, model: str | No
             # 远端模型支持 json_object 格式，不需要显式传 schema
             raw = await _call_remote_json(REDUCE_REWRITE_SYSTEM_PROMPT, prompt, model=rewrite_model, api_source=rewrite_source)
         else:
-            # Ollama 通过 format 字段传入 JSON Schema 约束输出结构
-            raw = await generate_json(REDUCE_REWRITE_SYSTEM_PROMPT, prompt, schema=schema, model=rewrite_model or OLLAMA_DEFAULT_MODEL)
+            # 改写输出包含完整文本，需显著提高 num_predict，避免被判别场景的小输出参数截断
+            raw = await generate_json(
+                REDUCE_REWRITE_SYSTEM_PROMPT,
+                prompt,
+                schema=schema,
+                model=rewrite_model or OLLAMA_DEFAULT_MODEL,
+                options={
+                    "temperature": 0.2,
+                    "num_ctx": OLLAMA_REWRITE_NUM_CTX,
+                    "num_predict": OLLAMA_REWRITE_NUM_PREDICT,
+                },
+            )
         return ReduceRewriteResult.model_validate(raw).model_dump()
     except Exception as exc:
         logger.warning("Rewrite failed, falling back to original text: %s", exc)
