@@ -17,7 +17,7 @@ from services.aggregate import aggregate_document, score_chunk
 from services.features import extract_chunk_features, extract_document_features
 from services.judges import judge_chunk_with_qwen
 from services.ollama_client import OLLAMA_DEFAULT_MODEL, generate_json
-from services.preprocess import chunk_text, clean_text, detect_genre
+from services.preprocess import chunk_text, clean_text, detect_genre, detect_language
 from services.prompts import REDUCE_REWRITE_SYSTEM_PROMPT, REMOTE_REVIEW_SYSTEM_PROMPT
 from services.schemas import ReduceRewriteResult, RemoteReviewResult
 
@@ -506,15 +506,17 @@ async def run_check(
     """
     # Step 1: 文本预处理
     cleaned = clean_text(content)
+    language = detect_language(cleaned)
     genre = detect_genre(cleaned)
-    doc_features = extract_document_features(cleaned)
+    doc_features = extract_document_features(cleaned, language=language)
     chunks = chunk_text(cleaned)
     logger.info(
-        "run_check params: api_source=%s requested_model=%s effective_local_model=%s plan=%s chars=%d chunks=%d",
+        "run_check params: api_source=%s requested_model=%s effective_local_model=%s plan=%s language=%s chars=%d chunks=%d",
         api_source or API_SOURCE,
         model,
         model or OLLAMA_DEFAULT_MODEL,
         plan,
+        language,
         len(cleaned),
         len(chunks),
     )
@@ -523,7 +525,8 @@ async def run_check(
     # Step 2: 逐分块提取特征 + LLM 打分 + 规则综合评分
     enriched_chunks: list[dict] = []
     for chunk in chunks:
-        features = extract_chunk_features(chunk["text"])
+        chunk_language = detect_language(chunk["text"]) if language == "mixed" else language
+        features = extract_chunk_features(chunk["text"], language=chunk_language)
         # 调用 Qwen 本地模型对分块进行风格判断，失败时自动降级为启发式规则
         qwen_result = await judge_chunk_with_qwen(chunk["text"], genre, features, model=model or OLLAMA_DEFAULT_MODEL)
         # 融合 LLM 分数（55%）、统计特征分（30%）、风格信号分（15%）

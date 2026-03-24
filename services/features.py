@@ -4,12 +4,12 @@ import re
 import statistics
 from collections import Counter
 
-from services.preprocess import clean_text, split_sentences
+from services.preprocess import clean_text, detect_language, split_sentences
 
 
 _PUNCTUATION_RE = re.compile(r"[，。！？；：、,.!?;:()\[\]{}\"'“”‘’《》<>/%-]")
 _TOKEN_RE = re.compile(r"[A-Za-z]+(?:'[A-Za-z]+)?|\d+(?:\.\d+)?|[\u4e00-\u9fff]")
-_CONNECTOR_PATTERNS = [
+_ZH_CONNECTOR_PATTERNS = [
     r"因此",
     r"所以",
     r"但是",
@@ -22,6 +22,8 @@ _CONNECTOR_PATTERNS = [
     r"其次",
     r"最后",
     r"总之",
+]
+_EN_CONNECTOR_PATTERNS = [
     r"in addition",
     r"however",
     r"therefore",
@@ -30,15 +32,39 @@ _CONNECTOR_PATTERNS = [
     r"firstly",
     r"secondly",
     r"finally",
+    r"overall",
+    r"in conclusion",
+    r"in summary",
+    r"as a result",
+    r"for example",
+    r"for instance",
+    r"on the other hand",
+    r"it is important to note(?: that)?",
+    r"it should be noted(?: that)?",
+    r"at the same time",
+    r"more importantly",
+    r"ultimately",
 ]
-_DETAIL_PATTERNS = [
+_COMMON_DETAIL_PATTERNS = [
     r"\b\d{4}[-/年]\d{1,2}(?:[-/月]\d{1,2}日?)?\b",
     r"\b\d{1,2}:\d{2}\b",
     r"\b\d+(?:\.\d+)?%\b",
     r"\b(?:USD|RMB|CNY|￥|\$)\s?\d+(?:\.\d+)?\b",
-    r"[A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,})*",
-    r"(?:截止|上线|验收|预算|负责人|owner|deadline|milestone|SLA|KPI|OKR)",
     r"(?:http|www\.)",
+]
+_ZH_DETAIL_PATTERNS = _COMMON_DETAIL_PATTERNS + [
+    r"(?:截止|上线|验收|预算|负责人)",
+    r"(?:邮箱|电话|微信|飞书)",
+]
+_EN_DETAIL_PATTERNS = _COMMON_DETAIL_PATTERNS + [
+    r"\b(?:owner|deadline|milestone|sla|kpi|okr|jira|confluence|notion|slack)\b",
+    r"\b[A-Z]{2,}-\d{2,}\b",
+    r"\bv?\d+\.\d+(?:\.\d+)?\b",
+    r"\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b",
+    r"\b(?:ticket|issue|sprint|release)\s+#?\d+\b",
+    r"\b[A-Z]{2,}(?:\d+)?\b",
+]
+_MIXED_DETAIL_PATTERNS = _ZH_DETAIL_PATTERNS + [
     r"(?:邮箱|电话|微信|Slack|飞书|Jira|Confluence|Notion)",
 ]
 _STOPWORDS = {
@@ -90,22 +116,44 @@ def _tokenize(text: str) -> list[str]:
     return [token.lower() for token in _TOKEN_RE.findall(text)]
 
 
-def _count_connectors(text: str) -> int:
-    """统计文本中中英文连接词（因此、however 等）的总出现次数。"""
+def _count_connectors(text: str, language: str) -> int:
+    """按语言统计连接词。"""
     lowered = text.lower()
-    return sum(len(re.findall(pattern, lowered)) for pattern in _CONNECTOR_PATTERNS)
+    patterns = _ZH_CONNECTOR_PATTERNS if language == "zh" else _EN_CONNECTOR_PATTERNS if language == "en" else _ZH_CONNECTOR_PATTERNS + _EN_CONNECTOR_PATTERNS
+    return sum(len(re.findall(pattern, lowered)) for pattern in patterns)
 
 
-def _detail_signal_count(text: str) -> int:
-    """统计日期、时间、百分比、金额、人名、工具链接等具体细节信号的总数量。"""
-    return sum(len(re.findall(pattern, text)) for pattern in _DETAIL_PATTERNS)
+def _detail_signal_count(text: str, language: str) -> int:
+    """按语言统计具体细节信号，英文不再广泛把 Title Case 视为真人细节。"""
+    if language == "zh":
+        patterns = _ZH_DETAIL_PATTERNS
+    elif language == "en":
+        patterns = _EN_DETAIL_PATTERNS
+    else:
+        patterns = _MIXED_DETAIL_PATTERNS
+    return sum(len(re.findall(pattern, text, flags=re.IGNORECASE)) for pattern in patterns)
 
 
-def _repeated_ngram_ratio(text: str, n: int = 4) -> float:
-    """计算 n-gram（默认 4-gram）重复率：重复出现的 gram 数 / 总 gram 数。
+def _repeated_ngram_ratio(text: str, language: str, n: int = 4) -> float:
+    """按语言计算重复 n-gram 比率。
 
-    去除空白后在字符级别滑窗，比例越高表示文本越模板化。
+    中文使用字符级 4-gram，英文使用词级 3-gram，mixed 取两者较高值。
     """
+    if language == "en":
+        tokens = [token.lower() for token in re.findall(r"[A-Za-z]+(?:'[A-Za-z]+)?", text)]
+        n_words = 3
+        if len(tokens) < n_words:
+            return 0.0
+        grams = [tuple(tokens[index : index + n_words]) for index in range(len(tokens) - n_words + 1)]
+        counts = Counter(grams)
+        repeated = sum(count - 1 for count in counts.values() if count > 1)
+        return repeated / len(grams) if grams else 0.0
+
+    if language == "mixed":
+        zh_ratio = _repeated_ngram_ratio(text, "zh", n=n)
+        en_ratio = _repeated_ngram_ratio(text, "en", n=n)
+        return max(zh_ratio, en_ratio)
+
     compact = re.sub(r"\s+", "", text)
     if len(compact) < n:
         return 0.0
@@ -123,7 +171,7 @@ def _top_terms(tokens: list[str], limit: int = 10) -> list[str]:
     return [token for token, count in counts.most_common(limit) if count > 1]
 
 
-def _extract_features(text: str) -> dict:
+def _extract_features(text: str, language: str | None = None) -> dict:
     """对文本进行全面的统计特征提取，返回供评分模型使用的特征字典。
 
     主要特征说明：
@@ -135,6 +183,7 @@ def _extract_features(text: str) -> dict:
     - list_line_ratio：列表行比例，高比例需降低 AI 判定权重
     """
     cleaned = clean_text(text)
+    language = language or detect_language(cleaned)
     # 去除空白后的紧凑文本，用于计算字符数和数字密度
     compact = re.sub(r"\s+", "", cleaned)
     sentences = split_sentences(cleaned)
@@ -145,9 +194,9 @@ def _extract_features(text: str) -> dict:
     tokens = _tokenize(cleaned)
     char_count = len(compact)
     token_count = len(tokens)
-    connector_count = _count_connectors(cleaned)
+    connector_count = _count_connectors(cleaned, language)
     punctuation_count = len(_PUNCTUATION_RE.findall(cleaned))
-    detail_signal_count = _detail_signal_count(cleaned)
+    detail_signal_count = _detail_signal_count(cleaned, language)
     lines = [line for line in cleaned.split("\n") if line.strip()]
     # 统计以列表符号开头的行比例，高比例说明内容为结构化列表
     list_line_ratio = (
@@ -166,11 +215,12 @@ def _extract_features(text: str) -> dict:
     return {
         "char_count": char_count,
         "sentence_count": len(sentences),
+        "language": language,
         "avg_sentence_length": round(avg_sentence_length, 4),
         "sentence_length_std": round(sentence_length_std, 4),
         "burstiness": round(burstiness, 4),
         "lexical_diversity": round(lexical_diversity, 4),
-        "repeated_ngram_ratio": round(_repeated_ngram_ratio(cleaned), 4),
+        "repeated_ngram_ratio": round(_repeated_ngram_ratio(cleaned, language), 4),
         "punctuation_density": round(punctuation_count / char_count, 4) if char_count else 0.0,
         "connector_density": round(connector_count / max(token_count, 1), 4),
         "paragraph_length_variance": round(paragraph_length_variance, 4),
@@ -183,11 +233,11 @@ def _extract_features(text: str) -> dict:
     }
 
 
-def extract_document_features(text: str) -> dict:
+def extract_document_features(text: str, language: str | None = None) -> dict:
     """提取整篇文档的统计特征，供文档级聚合使用。"""
-    return _extract_features(text)
+    return _extract_features(text, language=language)
 
 
-def extract_chunk_features(chunk_text: str) -> dict:
+def extract_chunk_features(chunk_text: str, language: str | None = None) -> dict:
     """提取单个分块的统计特征，供分块级评分使用。"""
-    return _extract_features(chunk_text)
+    return _extract_features(chunk_text, language=language)

@@ -14,6 +14,9 @@ logger = logging.getLogger(__name__)
 LOCAL_JUDGE_SKIP_SHORT_CHARS = int(os.getenv("LOCAL_JUDGE_SKIP_SHORT_CHARS", "170"))
 LOCAL_JUDGE_SKIP_LIST_RATIO = float(os.getenv("LOCAL_JUDGE_SKIP_LIST_RATIO", "0.55"))
 LOCAL_JUDGE_SKIP_DETAIL_COUNT = int(os.getenv("LOCAL_JUDGE_SKIP_DETAIL_COUNT", "5"))
+LOCAL_JUDGE_SKIP_SHORT_CHARS_EN = int(os.getenv("LOCAL_JUDGE_SKIP_SHORT_CHARS_EN", "110"))
+LOCAL_JUDGE_SKIP_LIST_RATIO_EN = float(os.getenv("LOCAL_JUDGE_SKIP_LIST_RATIO_EN", "0.75"))
+LOCAL_JUDGE_SKIP_DETAIL_COUNT_EN = int(os.getenv("LOCAL_JUDGE_SKIP_DETAIL_COUNT_EN", "8"))
 
 _QWEN_JUDGE_SCHEMA = {
     "type": "object",
@@ -103,7 +106,7 @@ def _heuristic_fallback(features: dict, genre: str) -> dict:
     }
 
 
-def _should_skip_qwen(features: dict, genre: str) -> tuple[bool, str]:
+def _should_skip_qwen(features: dict, genre: str, language: str) -> tuple[bool, str]:
     """对低信息量或结构化强的分块直接走启发式，减少本地模型调用。"""
     char_count = int(features.get("char_count", 0) or 0)
     sentence_count = int(features.get("sentence_count", 0) or 0)
@@ -111,11 +114,17 @@ def _should_skip_qwen(features: dict, genre: str) -> tuple[bool, str]:
     detail_count = int(features.get("detail_signal_count", 0) or 0)
     repeated = float(features.get("repeated_ngram_ratio", 0.0) or 0.0)
 
-    if char_count <= LOCAL_JUDGE_SKIP_SHORT_CHARS or sentence_count <= 1:
+    short_chars_threshold = LOCAL_JUDGE_SKIP_SHORT_CHARS_EN if language == "en" else LOCAL_JUDGE_SKIP_SHORT_CHARS
+    list_ratio_threshold = LOCAL_JUDGE_SKIP_LIST_RATIO_EN if language == "en" else LOCAL_JUDGE_SKIP_LIST_RATIO
+    detail_threshold = LOCAL_JUDGE_SKIP_DETAIL_COUNT_EN if language == "en" else LOCAL_JUDGE_SKIP_DETAIL_COUNT
+
+    if sentence_count <= 1 and char_count <= short_chars_threshold:
         return True, "short_or_single_sentence"
-    if genre == "list_or_table" or list_ratio >= LOCAL_JUDGE_SKIP_LIST_RATIO:
+    if genre == "list_or_table" or list_ratio >= list_ratio_threshold:
         return True, "structured_chunk"
-    if genre in {"business_doc", "academic"} and detail_count >= LOCAL_JUDGE_SKIP_DETAIL_COUNT and repeated < 0.035:
+    if language != "en" and char_count <= short_chars_threshold:
+        return True, "short_chunk"
+    if genre in {"business_doc", "academic"} and detail_count >= detail_threshold and repeated < 0.035:
         return True, "detail_heavy_formal"
     return False, ""
 
@@ -132,6 +141,7 @@ async def judge_chunk_with_qwen(
     若 LLM 调用失败（超时/格式异常等），自动降级为 _heuristic_fallback，不影响主流程。
     """
     compact_features = {
+        "lang": features.get("language"),
         "c": features.get("char_count"),
         "s": features.get("sentence_count"),
         "asl": features.get("avg_sentence_length"),
@@ -150,7 +160,7 @@ async def judge_chunk_with_qwen(
         "只输出 JSON，不要解释，不要 reasons，不要 markdown。"
     )
 
-    should_skip, skip_reason = _should_skip_qwen(features, genre)
+    should_skip, skip_reason = _should_skip_qwen(features, genre, features.get("language", "mixed"))
     if should_skip:
         heuristic = _heuristic_fallback(features, genre)
         heuristic["judge_mode"] = "heuristic_skip"

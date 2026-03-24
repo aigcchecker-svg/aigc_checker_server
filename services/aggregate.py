@@ -237,6 +237,7 @@ def aggregate_document(chunks: list[dict], genre: str, doc_features: dict) -> di
         "analysis": {
             "high_risk_chunks": high_risk_chunks,
             "genre": genre,
+            "language": doc_features.get("language"),
         },
         "summary": {
             "confidence_label": label,

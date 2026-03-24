@@ -134,6 +134,31 @@ def split_sentences(text: str) -> list[str]:
     return [item["text"] for item in _split_sentences_with_spans(clean_text(text))]
 
 
+def detect_language(text: str) -> str:
+    """粗粒度语言识别：zh / en / mixed。"""
+    cleaned = clean_text(text)
+    if not cleaned:
+        return "mixed"
+
+    zh_chars = len(re.findall(r"[\u4e00-\u9fff]", cleaned))
+    en_words = len(re.findall(r"[A-Za-z]+(?:'[A-Za-z]+)?", cleaned))
+    latin_chars = len(re.findall(r"[A-Za-z]", cleaned))
+
+    has_zh = zh_chars >= 8
+    has_en = en_words >= 8 or latin_chars >= 40
+
+    if has_zh and has_en:
+        zh_weight = zh_chars
+        en_weight = latin_chars
+        ratio = min(zh_weight, en_weight) / max(zh_weight, en_weight, 1)
+        return "mixed" if ratio >= 0.18 else ("zh" if zh_weight > en_weight else "en")
+    if has_zh:
+        return "zh"
+    if has_en:
+        return "en"
+    return "zh" if zh_chars >= latin_chars else "en"
+
+
 def chunk_text(text: str, target_size: int = 320, min_size: int = 180) -> list[dict]:
     """将文本切分为用于逐块评分的分块列表。
 
