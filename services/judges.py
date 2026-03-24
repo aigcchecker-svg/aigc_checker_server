@@ -42,10 +42,90 @@ _QWEN_JUDGE_SCHEMA = {
     "additionalProperties": False,
 }
 
+_LABEL_DEFAULT_SCORE = {
+    "human": 18.0,
+    "mixed": 52.0,
+    "ai": 82.0,
+}
+
+_LABEL_DEFAULT_SIGNALS = {
+    "human": {
+        "over_smooth": 0.18,
+        "template_pattern": 0.16,
+        "sentence_uniformity": 0.22,
+        "human_detail": 0.82,
+    },
+    "mixed": {
+        "over_smooth": 0.48,
+        "template_pattern": 0.42,
+        "sentence_uniformity": 0.46,
+        "human_detail": 0.52,
+    },
+    "ai": {
+        "over_smooth": 0.78,
+        "template_pattern": 0.66,
+        "sentence_uniformity": 0.74,
+        "human_detail": 0.18,
+    },
+}
+
+_LABEL_DEFAULT_PERPLEXITY = {
+    "human": 260.0,
+    "mixed": 110.0,
+    "ai": 24.0,
+}
+
+_LABEL_DEFAULT_BINOCULARS = {
+    "human": 0.82,
+    "mixed": 0.5,
+    "ai": 0.14,
+}
+
 
 def _clamp(value: float, low: float, high: float) -> float:
     """将 value 限定在 [low, high] 区间内。"""
     return max(low, min(high, value))
+
+
+def _to_float(value, default: float) -> float:
+    """将模型输出尽量转换为 float，失败时回退默认值。"""
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_qwen_result(data: dict) -> dict:
+    """对本地 Qwen 的宽松 JSON 输出做补全，尽量减少因缺字段触发兜底。"""
+    if not isinstance(data, dict):
+        return data
+
+    label = str(data.get("label") or "mixed").lower()
+    if label not in {"human", "mixed", "ai"}:
+        label = "mixed"
+
+    confidence = _clamp(_to_float(data.get("confidence"), 0.55), 0, 1)
+    ai_score = _clamp(_to_float(data.get("ai_score"), _LABEL_DEFAULT_SCORE[label]), 0, 100)
+
+    raw_signals = data.get("signals") if isinstance(data.get("signals"), dict) else {}
+    default_signals = _LABEL_DEFAULT_SIGNALS[label]
+    signals = {
+        "over_smooth": _clamp(_to_float(raw_signals.get("over_smooth"), default_signals["over_smooth"]), 0, 1),
+        "template_pattern": _clamp(_to_float(raw_signals.get("template_pattern"), default_signals["template_pattern"]), 0, 1),
+        "sentence_uniformity": _clamp(_to_float(raw_signals.get("sentence_uniformity"), default_signals["sentence_uniformity"]), 0, 1),
+        "human_detail": _clamp(_to_float(raw_signals.get("human_detail"), default_signals["human_detail"]), 0, 1),
+    }
+
+    return {
+        "ai_score": round(ai_score, 2),
+        "confidence": round(confidence, 4),
+        "signals": signals,
+        "label": label,
+        "perplexity_proxy": round(_clamp(_to_float(data.get("perplexity_proxy"), _LABEL_DEFAULT_PERPLEXITY[label]), 1, 2000), 2),
+        "binoculars_score": round(_clamp(_to_float(data.get("binoculars_score"), _LABEL_DEFAULT_BINOCULARS[label]), 0, 1), 4),
+    }
 
 
 def _heuristic_fallback(features: dict, genre: str) -> dict:
@@ -174,6 +254,7 @@ async def judge_chunk_with_qwen(
             schema=_QWEN_JUDGE_SCHEMA,
             model=model,
         )
+        data = _normalize_qwen_result(data)
         # 用 Pydantic 校验模型返回格式，字段缺失或类型不符时会抛出 ValidationError
         validated = QwenJudgeResult.model_validate(data)
         result = validated.model_dump()

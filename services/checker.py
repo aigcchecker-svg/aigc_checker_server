@@ -173,6 +173,94 @@ def _extract_json(text: str) -> dict:
         return json.loads(match.group(0))
 
 
+def _strip_html(text: str) -> str:
+    """去掉模型偶发返回的 HTML 标签，避免污染最终改写文本。"""
+    cleaned = re.sub(r"<[^>]+>", "", text)
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+
+def _format_probability(value, default: str = "0.00") -> str:
+    """将概率字段规范为保留两位小数的字符串。"""
+    try:
+        if value is None or value == "":
+            return default
+        return f"{float(value):.2f}"
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_reduce_changes(changes) -> list[dict]:
+    """宽松规范化 changes，兼容字符串列表和宽松字典结构。"""
+    normalized: list[dict] = []
+    if not isinstance(changes, list):
+        return normalized
+
+    for item in changes[:8]:
+        if isinstance(item, dict):
+            normalized.append(
+                {
+                    "original": str(item.get("original") or item.get("before") or ""),
+                    "revised": str(item.get("revised") or item.get("after") or ""),
+                    "reason": str(item.get("reason") or item.get("detail") or item.get("type") or ""),
+                }
+            )
+            continue
+        if isinstance(item, str):
+            normalized.append(
+                {
+                    "original": "",
+                    "revised": "",
+                    "reason": item.strip(),
+                }
+            )
+    return normalized
+
+
+def _normalize_rewrite_result(raw: dict, original_content: str) -> dict:
+    """将 Azure/OpenRouter 的宽松 JSON 结果规范成 ReduceRewriteResult 可接受的结构。"""
+    if not isinstance(raw, dict):
+        raise ValueError("rewrite result must be a dict")
+
+    reduced_candidate = raw.get("reduced")
+    rewrite_candidate = raw.get("rewrite")
+
+    reduced_text = ""
+    if isinstance(reduced_candidate, str) and reduced_candidate.strip():
+        reduced_text = reduced_candidate
+    elif isinstance(rewrite_candidate, str) and rewrite_candidate.strip():
+        # 某些模型会把 rewrite 字段误写成改写正文
+        reduced_text = rewrite_candidate
+    elif isinstance(raw.get("content"), str) and raw.get("content", "").strip():
+        reduced_text = raw["content"]
+
+    reduced_text = _strip_html(reduced_text) if reduced_text else original_content
+    rewrite_flag = raw.get("rewrite")
+    if isinstance(rewrite_flag, bool):
+        rewrite_success = rewrite_flag
+    else:
+        rewrite_success = bool(reduced_text and reduced_text != original_content)
+
+    model_value = str(raw.get("model") or "moderate").lower()
+    if model_value not in {"light", "moderate", "deep"}:
+        model_value = "moderate"
+
+    quality = raw.get("quality_score", 0)
+    try:
+        quality_score = round(_clamp(float(quality), 0, 100), 2)
+    except (TypeError, ValueError):
+        quality_score = 0.0
+
+    return {
+        "reduced": reduced_text,
+        "rewrite": rewrite_success,
+        "ai_probability": _format_probability(raw.get("ai_probability")),
+        "ai_reduced_probability": _format_probability(raw.get("ai_reduced_probability")),
+        "quality_score": quality_score,
+        "model": model_value,
+        "changes": _normalize_reduce_changes(raw.get("changes")),
+    }
+
+
 async def _call_azure_json(system_prompt: str, user_prompt: str, deployment_name: str, purpose: str) -> dict:
     """调用 Azure OpenAI Chat Completions JSON 模式。
 
@@ -497,7 +585,8 @@ async def _rewrite_content(content: str, detection_result: dict, model: str | No
                     model_id=provider_model,
                     purpose="rewrite_fallback",
                 )
-            return ReduceRewriteResult.model_validate(raw).model_dump()
+            normalized = _normalize_rewrite_result(raw, content)
+            return ReduceRewriteResult.model_validate(normalized).model_dump()
         except Exception as exc:
             logger.warning(
                 "Rewrite provider failed: provider=%s target_model=%s error=%s",
