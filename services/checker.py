@@ -712,7 +712,7 @@ async def _semantic_rewrite_step(content: str, detection_result: dict, model: st
             _log_task(
                 task_id,
                 "rewrite.step.start",
-                step="semantic_rewrite",
+                stage="semantic_rewrite",
                 provider=rewrite_provider,
                 target_model=provider_model,
                 requested_api_source=requested_api_source,
@@ -741,7 +741,7 @@ async def _semantic_rewrite_step(content: str, detection_result: dict, model: st
             _log_task(
                 task_id,
                 "rewrite.step.finish",
-                step="semantic_rewrite",
+                stage="semantic_rewrite",
                 provider=rewrite_provider,
                 target_model=provider_model,
                 applied=applied,
@@ -759,7 +759,7 @@ async def _semantic_rewrite_step(content: str, detection_result: dict, model: st
             _log_task(
                 task_id,
                 "rewrite.step.failure",
-                step="semantic_rewrite",
+                stage="semantic_rewrite",
                 provider=rewrite_provider,
                 target_model=provider_model,
                 error=exc,
@@ -783,7 +783,7 @@ async def _perturb_expression_step(original_text: str, current_text: str, detect
         _log_task(
             task_id,
             "rewrite.step.start",
-            step="expression_perturb",
+            stage="expression_perturb",
             provider="ollama",
             target_model=perturb_model,
         )
@@ -803,7 +803,7 @@ async def _perturb_expression_step(original_text: str, current_text: str, detect
         _log_task(
             task_id,
             "rewrite.step.finish",
-            step="expression_perturb",
+            stage="expression_perturb",
             provider="ollama",
             target_model=perturb_model,
             applied=applied,
@@ -830,7 +830,7 @@ async def _perturb_expression_step(original_text: str, current_text: str, detect
         _log_task(
             task_id,
             "rewrite.step.failure",
-            step="expression_perturb",
+            stage="expression_perturb",
             provider="ollama",
             target_model=perturb_model,
             error=exc,
@@ -883,17 +883,17 @@ async def _rewrite_content(content: str, detection_result: dict, model: str | No
         aggregated_changes.extend(perturb_step.get("changes", []))
         applied_steps.append("expression_perturb")
     else:
-        _log_task(task_id, "rewrite.step.skip", step="expression_perturb", reason="no_text_change")
+        _log_task(task_id, "rewrite.step.skip", stage="expression_perturb", reason="no_text_change")
 
-    _log_task(task_id, "rewrite.step.start", step="rule_injection", provider="rules", target_model="deterministic")
+    _log_task(task_id, "rewrite.step.start", stage="rule_injection", provider="rules", target_model="deterministic")
     rule_step = _rule_injection_step(content, current_text)
     if rule_step.get("applied"):
         current_text = rule_step["text"]
         aggregated_changes.extend(rule_step.get("changes", []))
         applied_steps.append("rule_injection")
-        _log_task(task_id, "rewrite.step.finish", step="rule_injection", provider="rules", target_model="deterministic", applied=True, chars=len(current_text))
+        _log_task(task_id, "rewrite.step.finish", stage="rule_injection", provider="rules", target_model="deterministic", applied=True, chars=len(current_text))
     else:
-        _log_task(task_id, "rewrite.step.skip", step="rule_injection", reason="no_rule_adjustment")
+        _log_task(task_id, "rewrite.step.skip", stage="rule_injection", reason="no_rule_adjustment")
 
     model_level = "deep" if len(applied_steps) >= 3 else "moderate"
     return ReduceRewriteResult(
