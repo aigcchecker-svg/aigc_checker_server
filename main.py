@@ -36,6 +36,12 @@ async def get_test_page():
             button:disabled { background-color: #9ca3af; cursor: not-allowed; }
             #loading { margin-top: 15px; color: #d97706; font-weight: bold; display: none; }
             .result-box { margin-top: 25px; border-top: 2px solid #e5e7eb; padding-top: 20px; display: none; }
+            .examples-section { margin-top: 28px; padding-top: 24px; border-top: 2px solid #e5e7eb; }
+            .examples-section h3 { margin-bottom: 14px; }
+            .example-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+            .example-card { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; }
+            .example-card h4 { margin: 0 0 8px; color: #0f172a; }
+            .example-card p { margin: 0 0 12px; color: #64748b; font-size: 13px; }
             pre { background: #1f2937; color: #f8f8f2; padding: 15px; border-radius: 6px; overflow-x: auto; font-size: 14px; }
         </style>
     </head>
@@ -81,6 +87,83 @@ The advent of electric vehicles has been touted as a cornerstone in the transiti
             <div id="resultBox" class="result-box">
                 <h3>📦 返回的 JSON 结构：</h3>
                 <pre id="jsonOutput"></pre>
+            </div>
+
+            <div class="examples-section">
+                <h3>📚 API 调用和返回示例</h3>
+                <div class="example-grid">
+                    <div class="example-card">
+                        <h4>scan 调用示例</h4>
+                        <p>`POST /api/scan`</p>
+                        <pre>curl -X POST http://127.0.0.1:8000/api/scan \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer &lt;YOUR_API_TOKEN&gt;" \
+  -d '{
+    "content": "这是待检测的长文本内容，长度至少 50 个字符。",
+    "model": "__DEFAULT_MODEL__",
+    "api_source": "__API_SOURCE__"
+  }'</pre>
+                    </div>
+
+                    <div class="example-card">
+                        <h4>scan 返回示例</h4>
+                        <p>文档级检测结果</p>
+                        <pre>{
+  "label": "Mixed",
+  "ai_probability": "58.32",
+  "confidence": "medium",
+  "chunks": [
+    {
+      "chunk_id": 0,
+      "label": "mixed",
+      "ai_score": 61.4,
+      "confidence": 0.68,
+      "text": "这是其中一个分块的示例文本。"
+    }
+  ],
+  "review": {
+    "enabled": false,
+    "used": false,
+    "provider": null,
+    "model": null,
+    "reason": "plan_disabled"
+  }
+}</pre>
+                    </div>
+
+                    <div class="example-card">
+                        <h4>reduce 调用示例</h4>
+                        <p>`POST /api/reduce`</p>
+                        <pre>curl -X POST http://127.0.0.1:8000/api/reduce \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer &lt;YOUR_API_TOKEN&gt;" \
+  -d '{
+    "content": "这是待降 AI 改写的长文本内容，长度至少 50 个字符。",
+    "model": "__DEFAULT_MODEL__",
+    "api_source": "__API_SOURCE__"
+  }'</pre>
+                    </div>
+
+                    <div class="example-card">
+                        <h4>reduce 返回示例</h4>
+                        <p>包含改写结果与改写状态</p>
+                        <pre>{
+  "reduced": "这是改写后的完整文本示例。",
+  "rewrite": true,
+  "ai_probability": "58.32",
+  "ai_reduced_probability": "31.07",
+  "quality_score": 74.5,
+  "model": "moderate",
+  "changes": [
+    {
+      "original": "首先，企业需要建立统一规范。",
+      "revised": "企业先得把规范定清楚。",
+      "reason": "降低模板化表达"
+    }
+  ]
+}</pre>
+                    </div>
+                </div>
             </div>
         </div>
 
